@@ -25,7 +25,7 @@ from datacube.api import API
 def list_variable_matches(api, variables):
     products = api.list_products()
     for product in products:
-        mappers = filter(lambda v: v.product_filter(product), variables)
+        mappers = [v for v in variables if v.product_filter(product)]
         for v_name, v_info in product['measurements'].items():
             for mapper in mappers:
                 mapper.variable_filter(v_name, v_info, product)
@@ -35,33 +35,38 @@ def list_variable_matches(api, variables):
     return matches
 
 
+def _get_variable_data_for_product(api, product, variables, **kwargs):
+    requested_datasets_with_variables = []
+    # Find out what filters we need to run for this product
+    mappers = [v for v in variables if v.product_filter(product)]
+    product_vars = {v_name: [mapper for mapper in mappers if mapper.variable_filter(v_name, v_info, product)]
+                    for v_name, v_info in product['measurements'].items()}
+    product_vars = {v: m_list for v, m_list in product_vars.items() if len(m_list)}
+
+    # If we aren't getting everything (ie filter==None) and we want something out of here
+    if variables is not None and product_vars:
+        storage_type = product['name']
+        #This should be dc.get_data_arrays
+        dataset = api.get_dataset(storage_type=storage_type, variables=product_vars.keys(), **kwargs)
+        for (source_name, data_array) in dataset.data_vars.items():
+            if source_name in product_vars:
+                data_source = {
+                    'name': source_name,
+                    'variable': product['measurements'][source_name],
+                    'product': product,
+                    'array': data_array,
+                }
+                requested_datasets_with_variables.append((data_source, product_vars[source_name]))
+    return requested_datasets_with_variables
+
+
 def get_variable_data(api, variables, **kwargs):
     if not hasattr(variables, '__iter__'):
         variables = [variables]
     requested_datasets_with_variables = []
     products = api.list_products()
     for product in products:
-        # Find out what filters we need to run for this product
-        mappers = filter(lambda v: v.product_filter(product), variables)
-        product_vars = {v_name: filter(lambda mapper: mapper.variable_filter(v_name, v_info, product), mappers)
-                        for v_name, v_info in product['measurements'].items()}
-        product_vars = {v: m_list for v, m_list in product_vars.items() if len(m_list)}
-        #product_vars = [v_name for v_name, v_info in product['measurements'].items()
-        #                if any(lambda mapper: mapper.variable_filter(v_name, v_info, product) for mapper in mappers)]
-        # If we aren't getting everything (ie filter==None) and we want something out of here
-        if variables is not None and product_vars:
-            storage_type = product['name']
-            #This should be dc.get_data_arrays
-            dataset = api.get_dataset(storage_type=storage_type, variables=product_vars.keys(), **kwargs)
-            for (source_name, data_array) in dataset.data_vars.items():
-                if source_name in product_vars:
-                    data_source = {
-                        'name': source_name,
-                        'variable': product['measurements'][source_name],
-                        'product': product,
-                        'array': data_array,
-                    }
-                    requested_datasets_with_variables.append((data_source, product_vars[source_name]))
+        requested_datasets_with_variables += _get_variable_data_for_product(api, product, variables, **kwargs)
     output_datasets = []
     for mapper in variables:
         input_datasets = [data_source for data_source, mapper_list in requested_datasets_with_variables
@@ -229,11 +234,9 @@ def by_band(*bands):
 
 
 class WavelengthRangeMapper(VariableMapper):
-    """
-    """
-    def __init__(self, range, name):
+    def __init__(self, wavelength_range, name):
         super(WavelengthRangeMapper, self).__init__()
-        self._range = range
+        self._range = wavelength_range
         self._name = name
 
     def variable_filter(self, source_name, variable, product):
@@ -249,7 +252,7 @@ class WavelengthRangeMapper(VariableMapper):
         return [merge_dicts(source_var, {'name': str(self._name)}) for source_var in source_data]
 
     def __repr__(self):
-        return "BandNumberMapper<{}>".format(self._band_number)
+        return "WavelengthRangeMapper<{}>".format(self._range)
 
 
 def by_wavelength(*wave_ranges):
@@ -287,25 +290,26 @@ class MapperMapper(VariableMapper):
     NDVI
     """
     def __init__(self, input_mappers, output_mappers):
+        super(MapperMapper, self).__init__(self)
         self.input_mappers = input_mappers
         self.output_mappers = output_mappers
         self.variable_mappings = defaultdict(list)
 
     def variable_filter(self, source_name, variable, product):
-        inFilter = False
+        is_match = False
         for mapper in self.input_mappers:
-            useMapper = mapper.variable_filter(source_name, variable, product)
-            if useMapper:
+            use_mapper = mapper.variable_filter(source_name, variable, product)
+            if use_mapper:
                 data_key = (product['name'], source_name)
                 self.variable_mappings[data_key].append(mapper)
-                inFilter = True
-        return inFilter
+                is_match = True
+        return is_match
 
     def combine(self, source_data):
         filtered_data = []
         for mapper in self.input_mappers:
             input_mapper_data = [entry for entry in source_data
-                                 if mapper in self.variable_mappings(entry['product']['name'], entry['name'])]
+                                 if mapper in self.variable_mappings[(entry['product']['name'], entry['name'])]]
             filtered_data.append(mapper.combine(input_mapper_data))
         return self.output_mappers.combine(filtered_data)
 
