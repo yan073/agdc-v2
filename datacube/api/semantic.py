@@ -35,25 +35,25 @@ def list_variable_matches(api, variables):
     return matches
 
 
-def _get_variable_data_for_product(api, product, variables, **kwargs):
+def _get_variable_data_for_product(api, prod, variables, **kwargs):
     requested_datasets_with_variables = []
     # Find out what filters we need to run for this product
-    mappers = [v for v in variables if v.product_filter(product)]
-    product_vars = {v_name: [mapper for mapper in mappers if mapper.variable_filter(v_name, v_info, product)]
-                    for v_name, v_info in product['measurements'].items()}
+    mappers = [v for v in variables if v.product_filter(prod)]
+    product_vars = {v_name: [mapper for mapper in mappers if mapper.variable_filter(v_name, v_info, prod)]
+                    for v_name, v_info in prod['measurements'].items()}
     product_vars = {v: m_list for v, m_list in product_vars.items() if len(m_list)}
 
     # If we aren't getting everything (ie filter==None) and we want something out of here
     if variables is not None and product_vars:
-        storage_type = product['name']
+        storage_type = prod['name']
         #This should be dc.get_data_arrays
         dataset = api.get_dataset(storage_type=storage_type, variables=product_vars.keys(), **kwargs)
         for (source_name, data_array) in dataset.data_vars.items():
             if source_name in product_vars:
                 data_source = {
                     'name': source_name,
-                    'variable': product['measurements'][source_name],
-                    'product': product,
+                    'variable': prod['measurements'][source_name],
+                    'product': prod,
                     'array': data_array,
                 }
                 requested_datasets_with_variables.append((data_source, product_vars[source_name]))
