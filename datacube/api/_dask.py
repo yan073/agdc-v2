@@ -15,20 +15,85 @@ import numpy
 
 
 def get_dask_array(storage_units, var_name, dimensions, dim_props, is_fake_array=False):
-    """
-    Create an xarray.DataArray
-    :return xarray.DataArray
-    """
-    dsk_id = var_name  # unique name for the requested dask
-    dsk = {}
-    if not is_fake_array:
-        dsk = _get_dask_for_storage_units(storage_units, var_name, dimensions, dim_props['dim_vals'], dsk_id)
-        _fill_in_dask_blanks(dsk, storage_units, var_name, dimensions, dim_props, dsk_id)
-
+    # calculate chunks per su index
+    chunk_size = (250, ) * len(dimensions)  # Bad default value
+    sample_su = storage_units[0]
+    if hasattr(sample_su, 'attributes'):
+        if 'storage_type' in sample_su.attributes:
+            if hasattr(sample_su.attributes['storage_type'], 'chunking'):
+                chunk_size = sample_su.attributes['storage_type'].chunking
+    storage_unit_sizes = [dim_props['sus_size'][dim] for dim in dimensions]
+    chunks, offsets = _get_chunks_and_offsets(storage_unit_sizes, chunk_size)
+    all_chunks = [tuple(itertools.chain(*chunk)) for chunk in chunks]
+    dsk = _make_dask(storage_units, var_name, dimensions, dim_props, chunks, offsets, all_chunks) \
+        if not is_fake_array else {}
     dtype = storage_units[0].variables[var_name].dtype
-    chunks = tuple(tuple(dim_props['sus_size'][dim]) for dim in dimensions)
-    dask_array = da.Array(dsk, dsk_id, chunks, dtype=dtype)
+    dask_array = da.Array(dsk, var_name, all_chunks, dtype=dtype)
     return dask_array
+
+
+def _make_dask(storage_units, var_name, dimensions, dim_props, chunks, offsets, all_chunks):
+    dsk = {}
+    for storage_unit in storage_units:
+        dsk.update(_make_dask_for_su(storage_unit, var_name, dimensions, dim_props, chunks, offsets))
+
+    all_keys = set(itertools.product((var_name,), *tuple(range(len(tuple(itertools.chain(*chunk))))
+                                                         for chunk in chunks)))
+    missing_keys = all_keys - set(dsk.keys())
+
+    dtype, nodata = _nodata_properties(storage_units, var_name)
+    dsk.update(_make_dask_for_blanks(missing_keys, all_chunks, dtype, nodata))
+    return dsk
+
+
+def _make_dask_for_su(storage_unit, var_name, dimensions, dim_props, chunks, offsets):
+    dsk = {}
+    file_index = tuple()   # Dask is indexed by a tuple of ("Name", x-index pos, y-index pos, z-index pos, ...)
+    for dim in dimensions:
+        ordinal = dim_props['dim_vals'][dim].index(storage_unit.coordinates[dim].begin)
+        file_index += (ordinal,)
+    slices = _get_slices_for_file_chunks(file_index, chunks, offsets)
+    for key, su_slice in slices.items():
+        dsk[(var_name,) + key] = (storage_unit.get_chunk, var_name, su_slice)
+    return dsk
+
+
+def _make_dask_for_blanks(missing_keys, all_chunks, dtype, nodata):
+    dsk = {}
+    for key in missing_keys:
+        shape = tuple()
+        for i, dim_chunks in enumerate(all_chunks):
+            shape += (dim_chunks[key[i+1]],)
+        dsk[key] = (_no_data_block, shape, dtype, nodata)
+    return dsk
+
+
+def _get_slices_for_file_chunks(file_index, chunks, offsets):
+    keys = ()
+    slices = []
+    for dim, file_i in enumerate(file_index):
+        offset = offsets[dim][file_i]
+        chunk = chunks[dim][file_i]
+        keys += (tuple(range(offset, offset+len(chunk))),)
+        slices += (map(slice, numpy.cumsum((0,) + chunk[:-1]), numpy.cumsum(chunk)),)
+    return dict(zip(itertools.product(*keys), itertools.product(*slices)))
+
+
+def _get_chunks_and_offsets(su_size, chunk_size):
+    offsets = [()] * len(su_size)
+    chunks = [()] * len(su_size)
+    for i, (file_lengths, chunk_length) in enumerate(zip(su_size, chunk_size)):
+        prev_file_cum = 0
+        for file_length in file_lengths:
+            d = file_length // chunk_length
+            m = file_length % chunk_length
+            file_dim_chunks = (chunk_length,) * d
+            if m:
+                file_dim_chunks += (m,)
+            chunks[i] += (file_dim_chunks,)
+            offsets[i] += (prev_file_cum, )
+            prev_file_cum += len(file_dim_chunks)
+    return chunks, offsets
 
 
 def _get_dask_for_storage_units(storage_units, var_name, dimensions, dim_vals, dsk_id):
@@ -36,8 +101,8 @@ def _get_dask_for_storage_units(storage_units, var_name, dimensions, dim_vals, d
     for storage_unit in storage_units:
         dsk_index = (dsk_id,)   # Dask is indexed by a tuple of ("Name", x-index pos, y-index pos, z-index pos, ...)
         for dim in dimensions:
-            ordinal = dim_vals[dim].index(storage_unit.coordinates[dim].begin)
-            dsk_index += (ordinal,)
+            file_ordinal = dim_vals[dim].index(storage_unit.coordinates[dim].begin)
+            dsk_index += (file_ordinal,)
         # TODO: Wrap in a chunked dask for sub-file dask chunks
         dsk[dsk_index] = (storage_unit.get_chunk, var_name, Ellipsis)
         #dsk[dsk_index] = (_get_chunked_data_func, storage_unit, var_name)

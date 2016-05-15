@@ -16,6 +16,7 @@
 from __future__ import absolute_import, division, print_function
 
 import datetime
+from collections import namedtuple
 
 import numpy
 from dateutil import tz
@@ -277,6 +278,8 @@ def test_dask():
     GEO_PROJ = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],' \
                'AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],' \
                'AUTHORITY["EPSG","4326"]]'
+    StorageType = namedtuple('StorageType', ('chunking'))
+    storage_type = StorageType(chunking=(1, 17, 13))
 
     affine1 = Affine.scale(0.1, 0.1)*Affine.translation(20, 30)
     ds1 = GeoBoxStorageUnit(GeoBox(100, 100, affine1, GEO_PROJ),
@@ -286,6 +289,8 @@ def test_dask():
                                                 dimensions=('time', 'latitude', 'longitude'), units='1')
                             })
     ds1.get_crs = lambda: {'time': None, 'latitude': None, 'longitude': None}
+    ds1.attributes = {'storage_type': storage_type}
+
     affine2 = Affine.scale(0.1, 0.1)*Affine.translation(120, 130)
     ds2 = GeoBoxStorageUnit(GeoBox(100, 100, affine2, GEO_PROJ),
                             {'time': Coordinate(numpy.dtype(numpy.int), begin=100, end=400, length=4, units='seconds')},
@@ -294,6 +299,7 @@ def test_dask():
                                                 dimensions=('time', 'latitude', 'longitude'), units='1')
                             })
     ds2.get_crs = lambda: {'time': None, 'latitude': None, 'longitude': None}
+    ds2.attributes = {'storage_type': storage_type}
 
     storage_units = [ds1, ds2]
     dim_props = get_dimension_properties(storage_units, ('time', 'latitude', 'longitude'), {})
