@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+#PBS -N gdal_translate 
+#PBS -P u46
+#PBS -q normal 
+#PBS -l walltime=24:00:00,ncpus=1,mem=2GB
+#PBS -l wd
+
+ODIR="/g/data/u46/bb/test"
+
+module load gdal/1.9.2 
+module load python/2.7.3
+
+echo directory is $ODIR
+cd $ODIR
+cnt=1
+     let cnt=$cnt+1
+     #gdal_translate -co "BIGTIFF=YES" -co "COMPRESS=LZW" -co "TILED=YES" -of GTiff  "$ODIR"/$fl "$ODIR"/$fl.tif &
+     gdal_translate -co "BIGTIFF=YES" -co "COMPRESS=LZW" -co "TILED=YES" -of GTiff  "$ODIR"/$fl "$ODIR"/$fl.tif &
+
+echo "Waiting for jobs to finish..."
+wait
+
+echo "done"
+
