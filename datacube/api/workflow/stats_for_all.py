@@ -43,11 +43,9 @@ import dask
 from collections import namedtuple
 from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, PERCENTILE, writeable_dir
 from datacube.api.utils_v1 import  pqa_mask_arg, statistic_arg, season_arg, calculate_stack_statistic_median
-from datacube.api.query_v1 import list_cells_as_list, list_tiles_as_list
-from datacube.api.model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, TciBands, Pq25Bands, Fc25Bands, Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands,  dataset_type_database, dataset_type_derived_nbar, DatasetType
-from datacube.api.utils_v1 import get_dataset_type_ndv, get_dataset_type_data_type, get_dataset_data_stack, log_mem, build_season_date_criteria
+from datacube.api.model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands, Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands,  dataset_type_database, dataset_type_derived_nbar, DatasetType
 from datacube.api.utils_v1 import PercentileInterpolation, get_satellite_string
-from datacube.api.utils_v1 import Season, SEASONS, NDV
+from datacube.api.utils_v1 import Season, SEASONS, NDV, build_season_date_criteria
 from datacube.api.utils_v1 import calculate_stack_statistic_count, calculate_stack_statistic_count_observed
 from datacube.api.utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
 from datacube.api.utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
@@ -61,6 +59,7 @@ from datacube.index import index_connect
 from datacube.api import make_mask, list_flag_names
 from datacube.storage.storage import GeoBox
 from datacube.api.fast import geomedian
+from datacube.api.tci_utils import calculate_tci
 
 dask.set_options(get=dask.async.get_sync)
 #dask.set_options(get=dask.threaded.get)
@@ -163,6 +162,8 @@ class StatsTask(object):
 
         self.interpolation = None
 
+        self.evi_args = None
+
     def setup_arguments(self):
 
         self.parser.add_argument("--x-min", help="X index for cells", action="store", dest="x_min", type=int,
@@ -241,6 +242,9 @@ class StatsTask(object):
                                  dest="season", type=season_arg, nargs="+",
                                  metavar=" ".join([s.name for s in Season]))
 
+        self.parser.add_argument("--evi-args", help="evi args(e.g. 2.5,1,6,7.5 for G,L,C1 and C2)", metavar="G,L,C1 and C2 2.5, 1, 6, 7.5",
+                                 action="store", dest="evi_args", type=float, nargs=4, default=[2.5, 1, 6, 7.5])
+
     def process_arguments(self, args):
 
         # # Call method on super class
@@ -283,6 +287,8 @@ class StatsTask(object):
         self.chunk_size = args.chunk_size
 
         self.statistics = args.statistic
+         
+        self.evi_args = args.evi_args
 
         if args.interpolation:
                 self.interpolation = args.interpolation
@@ -306,13 +312,14 @@ class StatsTask(object):
         epoch = {epoch}
         satellites = {satellites}
         output directory = {output_directory}
+        PQ apply = {mask_pqa_apply}
         PQA mask = {pqa_mask}
         local scheduler = {local_scheduler}
         workers = {workers}
         """.format(acq_min=self.acq_min, acq_max=self.acq_max,
                    epoch="{increment:d} / {duration:d}".format(increment=self.epoch.increment, duration=self.epoch.duration),
                    satellites=" ".join(self.satellites),
-                   output_directory=self.output_directory,
+                   output_directory=self.output_directory, mask_pqa_apply=self.mask_pqa_apply,
                    pqa_mask=self.mask_pqa_apply and " ".join([mask.name for mask in self.mask_pqa_mask]) or "",
                    local_scheduler=self.local_scheduler, workers=self.workers))
 
@@ -354,24 +361,14 @@ class StatsTask(object):
 
 
     def create_all_tasks(self):
-        dataset_types = [self.dataset_type]
-        for season in self.get_seasons():
-            acq_min_extended, acq_max_extended, criteria = build_season_date_criteria(self.acq_min, self.acq_max, season,
-                                                                                      seasons=SEASONS,
-                                                                                      extend=True)
-        mindt = (int(criteria[0][0].strftime("%Y")),int(criteria[0][0].strftime("%m")), int(criteria[0][0].strftime("%d")))
-        maxdt = (int(criteria[0][1].strftime("%Y")), int(criteria[0][1].strftime("%m")), int(criteria[0][1].strftime("%d")))
-    # ger product, platform names supported in datacube and validate against input
-    #prodname = dc.list_field_values('product')
-    #platname = dc.list_field_values('platform')
         '''
         des_query = {'dimensions': {'time': {'range': (mindt, maxdt)},'x':{'range': (self.x_min, self.x_min)},'y': {'range': (self.y_min, self.y_min)}}, 'product': product, 'platform': self.satellites}
         _log.info("des_query - %s", des_query)
         storage_type = dc.get_descriptor(descriptor_request=des_query).items()[0][0]
         _log.info("storage_type - %s", storage_type)
-        '''
     
         _log.info("date range to pass to dataset api at %s %s %s for %3d %4d on dataset %s",datetime.now(),  mindt, maxdt, self.x_min, self.y_min, dataset_types)
+        '''
         cells = (self.x_min, self.y_min)
         _log.info(" cell values  %s", cells)
     #cells = dc.list_cells(product='nbart', time=((2013,10,1), (2013,10,13)), latitude=(-21, -22), longitude=(142, 144))
@@ -387,10 +384,10 @@ class StatsTask(object):
                                   dataset_type=self.dataset_type, band=band, 
                                   mask_pqa_apply=self.mask_pqa_apply, mask_pqa_mask=self.mask_pqa_mask, 
                                   chunk_size=self.chunk_size, 
-                                  statistic = statistic, statistics=self.statistics, interpolation=self.interpolation)
+                                  statistic = statistic, statistics=self.statistics, interpolation=self.interpolation, evi_args=self.evi_args)
           
     def create_new_task(self, x, y, acq_min, acq_max, season, dataset_type, band, mask_pqa_apply, 
-                       mask_pqa_mask, chunk_size, statistic, statistics, interpolation):
+                       mask_pqa_mask, chunk_size, statistic, statistics, interpolation, evi_args):
             return EpochStatisticsTask(x=x, y=y,  
                                                acq_min=acq_min, acq_max=acq_max,
                                                season=season,
@@ -401,7 +398,7 @@ class StatsTask(object):
                                                chunk_size=chunk_size, 
                                                statistic = statistic, statistics=statistics,
                                                 interpolation=interpolation,
-                                               output_directory=self.output_directory)
+                                               output_directory=self.output_directory, evi_args=evi_args)
 
     def run(self):
 
@@ -444,6 +441,7 @@ class EpochStatisticsTask(Task):
     interpolation = luigi.Parameter()
 
     output_directory = luigi.Parameter()
+    evi_args = luigi.FloatParameter()
 
     def output(self):
         from datetime import date
@@ -568,9 +566,11 @@ class EpochStatisticsTask(Task):
               'comment': 'Geographic Coordinate System, ' + long_name,
               'Created': 'File Created on ' + str(datetime.now()) + ' for season ' + self.season.name + ' for year ' + self.acq_min.strftime("%Y")
                + "-" + self.acq_max.strftime("%Y"),
-              'license': 'Creative Commons Attribution 4.0 International (CC-BY 4.0)',
               'title': 'Statistical Data files From the Australian Geoscience Data Cube',
-              'product_version': '0.0.0',
+              'institution': 'GA',
+              'processing_level': 'L3',
+              'product_version': '2.0.0',
+              'project': 'AGDC',
               'geospatial_bounds':geospatial_bounds,
               'geospatial_bounds_crs':geospatial_bounds_crs,
               'geospatial_lat_min': geospatial_lat_min,
@@ -596,7 +596,10 @@ class EpochStatisticsTask(Task):
         ndv = numpy.nan
      
         for x_offset, y_offset in product(range(0, 4000, 4000), range(0, 4000, self.chunk_size)):
-            stack = data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+self.chunk_size)).load().data
+            if self.dataset_type.name == "TCI":
+                stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
+            else:
+                stack = data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+self.chunk_size)).load().data
             _log.info("stack stats shape %s for %s for (%03d ,%03d) x_offset %d for y_offset %d",  stack.shape, self.band.name, self.x, self.y, x_offset, y_offset)
             if self.statistic.name == "MIN":
                 stack_stat = calculate_stack_statistic_min(stack=stack, ndv=ndv, dtype=dtype)
@@ -638,41 +641,61 @@ class EpochStatisticsTask(Task):
 
     def get_derive_data(self, data, pq, mask_clear):
         ndvi = None
-        _log.info("getting NDVI data for red and nir bands")
+        import xarray as xa
+        _log.info("getting derived data for %s", self.dataset_type.name)
+        if pq:
+           data=data.where(mask_clear)
         if self.satellites[0] == "LANDSAT_8":
+            blue = data.band_2
             green = data.band_3
             red = data.band_4
             nir = data.band_5
             sw1 = data.band_6
             sw2 = data.band_7
         else:
+            blue = data.band_1
             green = data.band_2
             red = data.band_3
             nir = data.band_4
             sw1 = data.band_5
             sw2 = data.band_7
+        '''
         if pq:
+            blue = blue.where(mask_clear)
             green = green.where(mask_clear)
             red = red.where(mask_clear)
             nir = nir.where(mask_clear)
             sw1 = sw1.where(mask_clear)
             sw2 = sw2.where(mask_clear)
-
-        if self.band.name == "NDFI":
+        '''
+        if self.dataset_type.name == "NDFI":
             ndvi = (sw1 - nir) / (sw1 + nir)
             ndvi.name = "NDFI data"
-        if self.band.name == "NDVI":
+        if self.dataset_type.name == "NDVI":
             ndvi = (nir - red) / (nir + red)
             ndvi.name = "NDVI data"
-        if self.band.name == "NDWI":
+        if self.dataset_type.name == "NDWI":
             ndvi = (green - nir) / (green + nir)
             ndvi.name = "NDWI data"
-        if self.band.name == "MNDWI":
+        if self.dataset_type.name == "MNDWI":
             ndvi = (green - sw1) / (green + sw1)
             ndvi.name = "MNDWI data"
-        if self.band.name == "NBR":
+        if self.dataset_type.name == "NBR":
             ndvi = (nir - sw2) / (nir + sw2)
             ndvi.name = "NBR data"
+        if self.dataset_type.name == "EVI":
+            G=self.evi_args[0]
+            l=self.evi_args[1]
+            c1=self.evi_args[2]
+            c2=self.evi_args[3]
+            ndvi = G * ((nir - red) / (nir + c1 * red - c2 * blue + l))
+            ndvi.name = "EVI data"
+            _log.info("EVI cooefficients used are G=%f, l=%f, c1=%f, c2=%f", G, l, c1, c2)
+        if self.dataset_type.name == "TCI":
+           ndvi = calculate_tci(self.band.name, self.satellites[0], blue, green, red, nir, sw1, sw2)
+           #ndvi = xa.DataArray
+           #ndvi.name = "TCI data"
+           _log.info(" shape of TCI array is %s", ndvi.shape) 
         return ndvi
 
         
@@ -680,7 +703,7 @@ class EpochStatisticsTask(Task):
     def get_band_data(self, data):
         if self.band.name == "BLUE" :
             if self.satellites[0] == "LANDSAT_8":
-                band_data = data.band_2
+                band_data = data.band_2	
             else:
                 band_data = data.band_1
         if self.band.name == "GREEN" :
@@ -722,14 +745,14 @@ class EpochStatisticsTask(Task):
         dc = datacube.api.API(index, app="stats-app")
         #datasetquery= {(self.x, self.y), 'product'= self.dataset_type, 'platform'= self.satellites , 'time'=(mindt, maxdt)}
         #datasetquery = {(self.x, self.y), 'product': self.dataset_type, 'platform': self.satellites, 'time': (mindt, maxdt)}
-        _log.info("calling dataset at %s for %3d %4d on band  %s stats  %s  in the date range  %s %s ",datetime.now(), self.x, self.y, self.band.name, self.statistic.name, mindt, maxdt) 
+        _log.info("\tcalling dataset for %3d %4d on band  %s stats  %s  in the date range  %s %s ", self.x, self.y, self.band.name, self.statistic.name, mindt, maxdt) 
         pq = None
         product=(self.dataset_type.name).lower()
-        if product == "ndvi":
+        if product == "ndvi" or product == "ndwi" or product == "ndfi" or product == "mndwi" or product == "nbr" or product == "evi" or product == "tci":
             product="nbar"
         data = dc.get_dataset_by_cell((self.x,self.y), product=product, platform=self.satellites ,time=(mindt, maxdt))
         #bb = data.isel(x=slice(4000, 4000), y=slice(4000, 4000)).load().data
-        #_log.info("\tmin value of the array before pq  %f", numpy.amin(bb))
+        _log.info("\tshape of data received %s", data.band_2.shape )
         #data = data.load()
         crs_spatial_ref = data.crs.spatial_ref
         storage_type = data.storage_type
@@ -761,9 +784,10 @@ class EpochStatisticsTask(Task):
 
         if self.mask_pqa_apply:
             pq = dc.get_dataset_by_cell((self.x, self.y), product='pqa', platform=self.satellites ,time=(mindt, maxdt))
+            _log.info("\tpq dataset call completed for %3d %4d on band  %s stats  %s", self.x, self.y, self.band.name, self.statistic.name)
             if pq:
-                #mask_clear = pq['pixelquality'] & 15871  == 15871
-                mask_clear = pq['pixelquality']  == 16383
+                mask_clear = pq['pixelquality'] & 15871  == 15871
+                #mask_clear = pq['pixelquality']  == 16383
                 #_log.info("called pq dataset for pq data for band %s and length of pq data %d and %s", self.band.name, len(pq), pq['pixelquality'].time.values)
                 '''
                 mask_clear = make_mask(pq, band_5_saturated=False,band_6_1_saturated=False,cloud_shadow_acca=False, cloud_fmask=False, band_3_saturated=False,
@@ -772,6 +796,7 @@ class EpochStatisticsTask(Task):
                 '''
             else:
                 _log.info("No pixel quality available")
+        tci_data = None
         if self.band.name in [t.name for t in Ls57Arg25Bands]:
             band_data = self.get_band_data(data)
             if pq:
@@ -779,15 +804,22 @@ class EpochStatisticsTask(Task):
             else:
                 data = band_data
             _log.info("Received band %s data is %s ", self.band.name,  band_data)
+            data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
+        elif self.dataset_type.name == "TCI": 
+            tci_data = self.get_derive_data(data, pq, mask_clear)
+            data = data.band_1
         else:
-            data = self.get_derive_data(data, pq, mask_clear)
+            data = self.get_derive_data(data, pq, mask_clear)    
             _log.info("Received band %s data is %s ", self.band.name,  data)
-        data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
+        #data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
 
         # create a stats data variable
         stats_var = None
         odata = self.initialise_odata(dtype)  
-        odata = self.do_compute(data, odata, dtype)
+        if self.dataset_type.name == "TCI":
+            odata = self.do_compute(tci_data, odata, dtype)
+        else:
+            odata = self.do_compute(data, odata, dtype)
         #variable name
         stats_var = str(self.statistic.name).lower()
         if stats_var == "standard_deviation":
@@ -802,7 +834,11 @@ class EpochStatisticsTask(Task):
             stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' + band_data.attrs.get('long_name')))
             stats_dataset.attrs = band_data.attrs
         else:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' + self.band.name + ' datasets'))
+            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' + self.dataset_type.name + ' datasets'))
+            if (self.dataset_type.name).lower() == "evi":
+                stats_dataset.get(stats_var).attrs.update(dict(Comment='Parameters ' + str(self.evi_args) + ' for G,L,C1,C2 are used respectively' ))  
+            if (self.dataset_type.name).lower() == "tci":
+                stats_dataset.get(stats_var).attrs.update(dict(Comment='This is based on  ' + self.band.name + ' algorithm' ))  
         if self.season:
             stats_dataset.get(stats_var).attrs.update(dict(long_name= str(self.statistic.name).lower() + ' seasonal statistics for ' + str(self.season.name).lower() + ' of ' + str(self.satellites[0]).lower()))
             stats_dataset.get(stats_var).attrs.update(dict(standard_name = str(self.statistic.name).lower() + '_' + str(self.season.name).lower() + '_season_' + str(self.satellites[0]).lower()))
@@ -813,6 +849,7 @@ class EpochStatisticsTask(Task):
            
         if 'PERCENTILE' in self.statistic.name:
             stats_dataset.get(stats_var).attrs.update(dict(Comment2='Percentile method used ' + self.interpolation.name))
+        
         stats_dataset.get(stats_var).attrs.update(dict(units='metre', _FillValue= '-999', grid_mapping = "crs"))
 
         stats_dataset.attrs.update(dict(descriptor))
