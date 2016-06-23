@@ -47,7 +47,6 @@ from scipy.ndimage import map_coordinates
 from datacube.api.model_v1 import Pq25Bands, Ls57Arg25Bands, Satellite, DatasetType, Ls8Arg25Bands
 from datacube.api.model_v1 import Wofs25Bands, NdviBands, NdwiBands, MndwiBands
 from datacube.api.model_v1 import get_bands, EviBands, NbrBands, TciBands
-from eotools.coordinates import convert_coordinates
 
 
 _log = logging.getLogger(__name__)
@@ -579,6 +578,7 @@ def writeable_dir(prospective_dir):
 
 def pqa_mask_arg(s):
     if s in [m.name for m in PqaMask]:
+        return getattr(PqaMask, s)
         return PqaMask[s]
     raise argparse.ArgumentTypeError("{0} is not a supported PQA mask".format(s))
 
