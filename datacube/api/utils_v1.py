@@ -578,7 +578,6 @@ def writeable_dir(prospective_dir):
 
 def pqa_mask_arg(s):
     if s in [m.name for m in PqaMask]:
-        return getattr(PqaMask, s)
         return PqaMask[s]
     raise argparse.ArgumentTypeError("{0} is not a supported PQA mask".format(s))
 
