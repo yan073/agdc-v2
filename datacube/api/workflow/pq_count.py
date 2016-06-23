@@ -58,12 +58,10 @@ from datacube.api.utils_v1 import calculate_stack_statistic_count_observed
 from datacube.api.utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
 from datacube.api.utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
 from datacube.api.utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
-from datacube.api.workflow_setup import Task
+#from datacube.api.workflow_setup import Task
 from datacube.index import index_connect
 # from datacube.api import make_mask, list_flag_names
 from datacube.storage.storage import GeoBox
-from datacube.api.fast import geomedian
-from datacube.api.tci_utils import calculate_tci
 import datacube.api
 
 dask.set_options(get=dask.async.get_sync)
@@ -156,6 +154,21 @@ def percentile_interpolation_arg(s):
         return PercentileInterpolation[s]
     raise argparse.ArgumentTypeError("{0} is not a supported percentile interpolation"
                                      .format(s))
+
+
+class Task(luigi.Task):
+
+    __metaclass__ = abc.ABCMeta
+    def complete(self):
+        from luigi.task import flatten
+
+        for output in flatten(self.output()):
+            if not output.exists():
+                return False
+        for dep in flatten(self.deps()):
+            if not dep.complete():
+                return False
+        return True
 
 
 class PQCountTask(object):       # pylint: disable=too-many-instance-attributes

@@ -61,7 +61,7 @@ from datacube.api.utils_v1 import calculate_stack_statistic_variance, calculate_
 from datacube.index import index_connect
 # from datacube.api import make_mask, list_flag_names
 from datacube.storage.storage import GeoBox
-from datacube.api.fast import geomedian
+# from datacube.api.fast import geomedian
 from datacube.api.tci_utils import calculate_tci
 import datacube.api
 
@@ -543,7 +543,7 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
             elif self.statistic.name == "GEOMEDIAN":
                 tran_data = np.transpose(stack)
                 _log.info("\t shape of data array to pass %s", np.shape(tran_data))
-                stack_stat = geomedian(tran_data, 1e-3, maxiters=20)
+                # stack_stat = geomedian(tran_data, 1e-3, maxiters=20)
             elif self.statistic.name == "MEDIAN":
                 stack_stat = calculate_stack_statistic_median(stack=stack, ndv=ndv, dtype=dtype)
             elif self.statistic.name == "VARIANCE":
