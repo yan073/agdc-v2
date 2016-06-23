@@ -29,7 +29,7 @@
 
 
 """
-    Calculates stats for time series LANDSAT data
+    Calculates pixel quality counts for time series LANDSAT data
     __author__ = 'u81051'
 """
 
@@ -45,6 +45,7 @@ from datetime import datetime
 from enum import Enum
 import dask
 import numpy as np
+import xarray as xr
 import luigi
 from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, PERCENTILE, writeable_dir
 from datacube.api.utils_v1 import pqa_mask_arg, statistic_arg, season_arg, calculate_stack_statistic_median
@@ -83,6 +84,24 @@ class Satellite(Enum):
     LANDSAT_5 = "LANDSAT_5"
     LANDSAT_7 = "LANDSAT_7"
     LANDSAT_8 = "LANDSAT_8"
+
+
+class MaskProduct(Enum):
+    __order__ = "TOTAL_OBS CLEAR SATURATION SAT_OPTICAL SAT_THERMAL CONTIGUITY LAND \
+                CLOUD CLOUD_ACCA CLOUD_FMASK CLOUD_SH_ACCA CLOUD_SH_FMASK"
+
+    TOTAL_OBS = 0
+    CLEAR = 16383
+    SATURATION = 255
+    SAT_OPTICAL = 159
+    SAT_THERMAL = 96
+    CONTIGUITY = 256
+    LAND = 512
+    CLOUD = 15360
+    CLOUD_ACCA = 1024
+    CLOUD_FMASK = 2048
+    CLOUD_SH_ACCA = 4096
+    CLOUD_SH_FMASK = 8192
 
 
 def satellite_arg(s):
@@ -139,8 +158,8 @@ def percentile_interpolation_arg(s):
                                      .format(s))
 
 
-class StatsTask(object):       # pylint: disable=too-many-instance-attributes
-    def __init__(self, name="Band Statistics Workflow"):
+class PQCountTask(object):       # pylint: disable=too-many-instance-attributes
+    def __init__(self, name="Pixel Quality Count Workflow"):
 
         self.name = name
         self.parser = argparse.ArgumentParser(prog=sys.argv[0],
@@ -217,18 +236,10 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
                                  dest="dataset_type", type=dataset_type_arg, choices=self.get_supported_dataset_types(),
                                  default=DatasetType.nbar,
                                  metavar=" ".join([dt.name for dt in self.get_supported_dataset_types()]))
-        self.parser.add_argument("--band", help="The band(s) to process", action="store",
-                                 default=Ls57Arg25Bands,  # required=True,
-                                 dest="bands", type=all_arg_band_arg, nargs="+",
-                                 metavar=" ".join([b.name for b in Ls57Arg25Bands]))
         self.parser.add_argument("--chunk-size", help="dask chunk size", action="store", dest="chunk_size", type=int,
                                  choices=range(1, 4000 + 1),
                                  default=1000,  # required=True
                                  metavar="0 ... 4000")
-        self.parser.add_argument("--statistic", help="The statistic(s) to produce", action="store",
-                                 default=[Statistic.PERCENTILE_25, Statistic.PERCENTILE_50, Statistic.PERCENTILE_75],
-                                 dest="statistic", type=statistic_arg, nargs="+",
-                                 metavar=" ".join([s.name for s in Statistic]))
         self.parser.add_argument("--interpolation", help="The interpolation method to use", action="store",
                                  default=PercentileInterpolation.NEAREST,  # required=True,
                                  dest="interpolation", type=percentile_interpolation_arg,
@@ -237,9 +248,6 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
                                  default=Season,  # required=True,
                                  dest="season", type=season_arg, nargs="+",
                                  metavar=" ".join([s.name for s in Season]))
-        self.parser.add_argument("--evi-args", help="evi args(e.g. 2.5,1,6,7.5 for G,L,C1 and C2)",
-                                 metavar="G,L,C1 and C2 2.5, 1, 6, 7.5",
-                                 action="store", dest="evi_args", type=float, nargs=4, default=[2.5, 1, 6, 7.5])
 
     def process_arguments(self, args):
 
@@ -262,10 +270,7 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
         self.workers = args.workers
         _log.setLevel(args.log_level)
         self.dataset_type = args.dataset_type
-        self.bands = args.bands
         self.chunk_size = args.chunk_size
-        self.statistics = args.statistic
-        self.evi_args = args.evi_args
 
         if args.interpolation:
             self.interpolation = args.interpolation
@@ -274,15 +279,14 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
 
     def log_arguments(self):
 
-        _log.info("\t x = %03d, y = %03d acq = {%s} to {%s} epoch = {%d/%d} satellites = {%s} bands = %s ",
+        _log.info("\t x = %03d, y = %03d acq = {%s} to {%s} epoch = {%d/%d} satellites = {%s}",
                   self.x_min, self.y_min, self.acq_min, self.acq_max, self.epoch.increment, self.epoch.duration,
-                  " ".join(self.satellites), " ".join([b.name for b in self.bands]))
+                  " ".join(self.satellites))
         _log.info("\t output directory = {%s} PQ apply = %s PQA mask = %s local scheduler = %s workers = %s",
                   self.output_directory, self.mask_pqa_apply, self.mask_pqa_apply and
                   " ".join([mask.name for mask in self.mask_pqa_mask]) or "", self.local_scheduler, self.workers)
-        _log.info("\t dataset to retrieve %s dask chunk size = %d seasons = %s statistics = %s interpolation = %s",
-                  self.dataset_type, self.chunk_size, " ".join([s.name for s in self.seasons]),
-                  " ".join([s.name for s in self.statistics]), self.interpolation.name)
+        _log.info("\t dataset to retrieve %s dask chunk size = %d seasons = %s",
+                  self.dataset_type, self.chunk_size, " ".join([s.name for s in self.seasons]))
 
     def get_epochs(self):
 
@@ -307,8 +311,7 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
     def create_all_tasks(self):
         cells = (self.x_min, self.y_min)
         _log.info(" cell values  %s", cells)
-        for ((acq_min, acq_max), season, band, statistic) in product(self.get_epochs(), self.get_seasons(),
-                                                                     self.bands, self.statistics):
+        for ((acq_min, acq_max), season) in product(self.get_epochs(), self.get_seasons()):
             acq_min_extended, acq_max_extended, criteria = build_season_date_criteria(self.acq_min, self.acq_max,
                                                                                       season,
                                                                                       extend=True)
@@ -320,22 +323,19 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
                       datetime.now(),
                       self.x_min, self.y_min, acq_min_extended, acq_max_extended, season, mindt, maxdt)
             yield self.create_new_task(x=self.x_min, y=self.y_min, acq_min=acq_min_extended, acq_max=acq_max_extended,
-                                       season=season, dataset_type=self.dataset_type, band=band,
+                                       season=season, dataset_type=self.dataset_type,
                                        mask_pqa_apply=self.mask_pqa_apply, mask_pqa_mask=self.mask_pqa_mask,
-                                       chunk_size=self.chunk_size, statistic=statistic, statistics=self.statistics,
-                                       interpolation=self.interpolation, evi_args=self.evi_args)
+                                       chunk_size=self.chunk_size)
 
     # pylint: disable=too-many-arguments
-    def create_new_task(self, x, y, acq_min, acq_max, season, dataset_type, band, mask_pqa_apply,
-                        mask_pqa_mask, chunk_size, statistic, statistics, interpolation,
-                        evi_args):
-        return EpochStatisticsTask(x_cell=x, y_cell=y, acq_min=acq_min, acq_max=acq_max,
-                                   season=season, satellites=self.satellites,
-                                   dataset_type=dataset_type, band=band,
-                                   mask_pqa_apply=mask_pqa_apply, mask_pqa_mask=mask_pqa_mask,
-                                   chunk_size=chunk_size, statistic=statistic,
-                                   statistics=statistics, interpolation=interpolation,
-                                   output_directory=self.output_directory, evi_args=evi_args)
+    def create_new_task(self, x, y, acq_min, acq_max, season, dataset_type, mask_pqa_apply,
+                        mask_pqa_mask, chunk_size):
+        return EpochCountTask(x_cell=x, y_cell=y, acq_min=acq_min, acq_max=acq_max,
+                              season=season, satellites=self.satellites,
+                              dataset_type=dataset_type,
+                              mask_pqa_apply=mask_pqa_apply, mask_pqa_mask=mask_pqa_mask,
+                              chunk_size=chunk_size,
+                              output_directory=self.output_directory)
 
     def run(self):
 
@@ -349,7 +349,7 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
             mpi.run(self.create_all_tasks())
 
 
-class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
+class EpochCountTask(Task):     # pylint: disable=abstract-method
     x_cell = luigi.IntParameter()
     y_cell = luigi.IntParameter()
     acq_min = luigi.DateParameter()
@@ -358,15 +358,10 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
     # epochs = luigi.Parameter(is_list=True, significant=False)
     satellites = luigi.Parameter(is_list=True)
     dataset_type = luigi.Parameter()
-    band = luigi.Parameter()
     mask_pqa_apply = luigi.BooleanParameter()
     mask_pqa_mask = luigi.Parameter(is_list=True)
     chunk_size = luigi.IntParameter()
-    statistic = luigi.Parameter()
-    statistics = luigi.Parameter(is_list=True)
-    interpolation = luigi.Parameter()
     output_directory = luigi.Parameter()
-    evi_args = luigi.FloatParameter()
 
     def output(self):
 
@@ -376,10 +371,10 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
         season_start = "{month}{day:02d}".format(month=season[0][0].name[:3], day=season[0][1])
         season_end = "{month}{day:02d}".format(month=season[1][0].name[:3], day=season[1][1])
         sat = ",".join(self.satellites)
-        filename = "{sat}_{prod}_{x:03d}_{y:03d}_{acq_min}_{acq_max}_{sea_st}_{sea_en}_{band}_{stat}.nc" \
-                   .format(sat=sat, prod=str(self.dataset_type.name).upper(),
+        filename = "{sat}_PQCOUNT_{x:03d}_{y:03d}_{acq_min}_{acq_max}_{sea_st}_{sea_en}.nc" \
+                   .format(sat=sat,
                            x=self.x_cell, y=self.y_cell, acq_min=acq_min, acq_max=acq_max, sea_st=season_start,
-                           sea_en=season_end, band=self.band.name, stat=self.statistic.name)
+                           sea_en=season_end)
         return luigi.LocalTarget(os.path.join
                                  (self.output_directory, filename))
 
@@ -497,139 +492,9 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
         }
         return extents
 
-    def initialise_odata(self, dtype):
-        shape = (4000, 4000)
-        nbar = np.empty(shape, dtype=dtype)
-        nbar.fill(NDV)
-        return nbar
-
-    def do_compute(self, data, odata, dtype):     # pylint: disable=too-many-branches
-
-        _log.info("doing computations for %s on  %s of on odata shape %s",
-                  self.statistic.name, datetime.now(), odata.shape)
-        ndv = np.nan
-        # pylint: disable=range-builtin-not-iterating
-        for x_offset, y_offset in product(range(0, 4000, 4000),
-                                          range(0, 4000, self.chunk_size)):
-            if self.dataset_type.name == "TCI":
-                stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
-            else:
-                stack = data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+self.chunk_size)).load().data
-            _log.info("stack stats shape %s for %s for (%03d ,%03d) x_offset %d for y_offset %d",
-                      stack.shape, self.band.name, self.x_cell, self.y_cell, x_offset, y_offset)
-            if self.statistic.name == "MIN":
-                stack_stat = calculate_stack_statistic_min(stack=stack, ndv=ndv, dtype=dtype)
-                # data = data.reduce(numpy.nanmin, axis=0)
-                # odata = odata.min(axis=0, skipna='True')
-            elif self.statistic.name == "MAX":
-                stack_stat = calculate_stack_statistic_max(stack=stack, ndv=ndv, dtype=dtype)
-            elif self.statistic.name == "MEAN":
-                stack_stat = calculate_stack_statistic_mean(stack=stack, ndv=ndv, dtype=dtype)
-            elif self.statistic.name == "GEOMEDIAN":
-                tran_data = np.transpose(stack)
-                _log.info("\t shape of data array to pass %s", np.shape(tran_data))
-                stack_stat = geomedian(tran_data, 1e-3, maxiters=20)
-            elif self.statistic.name == "MEDIAN":
-                stack_stat = calculate_stack_statistic_median(stack=stack, ndv=ndv, dtype=dtype)
-            elif self.statistic.name == "VARIANCE":
-                stack_stat = calculate_stack_statistic_variance(stack=stack, ndv=ndv, dtype=dtype)
-            elif self.statistic.name == "STANDARD_DEVIATION":
-                stack_stat = calculate_stack_statistic_standard_deviation(stack=stack, ndv=ndv, dtype=dtype)
-            elif self.statistic.name == "COUNT_OBSERVED":
-                stack_stat = calculate_stack_statistic_count_observed(stack=stack, ndv=ndv, dtype=dtype)
-            elif 'PERCENTILE' in self.statistic.name:
-                percent = int(str(self.statistic.name).split('_')[1])
-                _log.info("\tcalculating percentile %d", percent)
-                stack_stat = calculate_stack_statistic_percentile(stack=stack,
-                                                                  percentile=percent,
-                                                                  ndv=ndv, interpolation=self.interpolation)
-
-            odata[y_offset:y_offset+self.chunk_size, x_offset:4000] = stack_stat
-        _log.info("stats finished for (%03d, %03d) band %s on %s", self.x_cell, self.y_cell, self.band.name, odata)
-        return odata
-
-    def get_derive_data(self, data, pq, mask_clear):
-        ndvi = None
-        sat = ",".join(self.satellites)
-        _log.info("getting derived data for %s for satellite %s", self.dataset_type.name, sat)
-        if pq:
-            data = data.where(mask_clear)
-        if sat == "LANDSAT_8":
-            blue = data.band_2
-            green = data.band_3
-            red = data.band_4
-            nir = data.band_5
-            sw1 = data.band_6
-            sw2 = data.band_7
-        else:
-            blue = data.band_1
-            green = data.band_2
-            red = data.band_3
-            nir = data.band_4
-            sw1 = data.band_5
-            sw2 = data.band_7
-        if self.dataset_type.name == "NDFI":
-            ndvi = (sw1 - nir) / (sw1 + nir)
-            ndvi.name = "NDFI data"
-        if self.dataset_type.name == "NDVI":
-            ndvi = (nir - red) / (nir + red)
-            ndvi.name = "NDVI data"
-        if self.dataset_type.name == "NDWI":
-            ndvi = (green - nir) / (green + nir)
-            ndvi.name = "NDWI data"
-        if self.dataset_type.name == "MNDWI":
-            ndvi = (green - sw1) / (green + sw1)
-            ndvi.name = "MNDWI data"
-        if self.dataset_type.name == "NBR":
-            ndvi = (nir - sw2) / (nir + sw2)
-            ndvi.name = "NBR data"
-        if self.dataset_type.name == "EVI":
-            g, l, c1, c2 = self.evi_args      # pylint: disable=unpacking-non-sequence
-            ndvi = g * ((nir - red) / (nir + c1 * red - c2 * blue + l))
-            ndvi.name = "EVI data"
-            _log.info("EVI cooefficients used are G=%f, l=%f, c1=%f, c2=%f", g, l, c1, c2)
-        if self.dataset_type.name == "TCI":
-            ndvi = calculate_tci(self.band.name, sat, blue, green, red, nir, sw1, sw2)
-            _log.info(" shape of TCI array is %s", ndvi.shape)
-        return ndvi
-
-    def get_band_data(self, data):     # pylint: disable=too-many-branches
-        sat = ",".join(self.satellites)
-        if self.band.name == "BLUE":
-            if sat == "LANDSAT_8":
-                band_data = data.band_2
-            else:
-                band_data = data.band_1
-        if self.band.name == "GREEN":
-            if sat == "LANDSAT_8":
-                band_data = data.band_3
-            else:
-                band_data = data.band_2
-        if self.band.name == "RED":
-            if sat == "LANDSAT_8":
-                band_data = data.band_4
-            else:
-                band_data = data.band_3
-        if self.band.name == "NEAR_INFRARED":
-            if sat == "LANDSAT_8":
-                band_data = data.band_5
-            else:
-                band_data = data.band_4
-        if self.band.name == "SHORT_WAVE_INFRARED_1":
-            if sat == "LANDSAT_8":
-                band_data = data.band_6
-            else:
-                band_data = data.band_5
-        if self.band.name == "SHORT_WAVE_INFRARED_2":
-            if sat == "LANDSAT_8":
-                band_data = data.band_7
-            else:
-                band_data = data.band_7
-        return band_data
-
     def data_write(self, dtype):        # pylint: disable=too-many-branches,too-many-statements
         # pylint: disable=too-many-boolean-expressions,too-many-locals
-
+        filename = self.output().path
         acq_min_extended, acq_max_extended, criteria = build_season_date_criteria(self.acq_min, self.acq_max,
                                                                                   self.season,
                                                                                   extend=True)
@@ -638,17 +503,14 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
         maxdt = (int(criteria[0][1].strftime("%Y")), int(criteria[0][1].strftime("%m")),
                  int(criteria[0][1].strftime("%d")))
         index = index_connect()
-        dc = datacube.api.API(index, app="stats-app")
-        _log.info("\tcalling dataset for %3d %4d on band  %s stats  %s  in the date range  %s %s for satellite %s",
-                  self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, self.satellites)
-        pq = None
-        prodname = (self.dataset_type.name).lower()
-        if prodname == "ndvi" or prodname == "ndwi" or prodname == "ndfi" or prodname == "mndwi" or \
-           prodname == "nbr" or prodname == "evi" or prodname == "tci":
-            prodname = "nbar"
-        data = dc.get_dataset_by_cell((self.x_cell, self.y_cell), product=prodname, platform=self.satellites,
-                                      time=(mindt, maxdt))
-        _log.info("\tshape of data received %s", data.band_2.shape)
+        dc = datacube.api.API(index, app="pixelQual-count-app")
+        _log.info("\tcalling dataset for %3d %4d on in the date range  %s %s for satellite %s",
+                  self.x_cell, self.y_cell, mindt, maxdt, self.satellites)
+        data = dc.get_dataset_by_cell((self.x, self.y), product='pqa', platform=self.satellites, time=(mindt, maxdt))
+        if data:
+            _log.info("\t pq dataset shape reurned %s", data.pixelquality.shape)
+        else:
+            _log.info("\t no pq dataset found")
         crs_spatial_ref = data.crs.spatial_ref
         storage_type = data.storage_type
         descriptor = self.write_geographical_extents_attributes(index, storage_type)
@@ -667,97 +529,85 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
                          'cloud_shadow_fmask': False,
                          'band_7_saturated': False}
         ga_good_pixel.update(dict(contiguity=True, land_obs=True))
-        if self.mask_pqa_apply:
-            pq = dc.get_dataset_by_cell((self.x_cell, self.y_cell), product='pqa', platform=self.satellites,
-                                        time=(mindt, maxdt))
-            _log.info("\tpq dataset call completed for %3d %4d on band  %s stats  %s",
-                      self.x_cell, self.y_cell, self.band.name, self.statistic.name)
-            if pq:
-                mask_clear = pq['pixelquality'] & 15871 == 15871
-                # mask_clear = pq['pixelquality']  == 16383
-                # _log.info("called pq dataset for pq data for band %s and length of pq data %d and %s",
-                #            self.band.name, len(pq), pq['pixelquality'].time.values)
-            else:
-                _log.info("No pixel quality available")
-        tci_data = None
-        if self.band.name in [t.name for t in Ls57Arg25Bands]:
-            band_data = self.get_band_data(data)
-            if pq:
-                data = band_data.where(mask_clear)
-            else:
-                data = band_data
-            _log.info("Received band %s data is %s ", self.band.name, band_data)
-            data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
-        elif self.dataset_type.name == "TCI":
-            tci_data = self.get_derive_data(data, pq, mask_clear)
-            data = data.band_1
-        else:
-            data = self.get_derive_data(data, pq, mask_clear)
-            _log.info("Received band %s data is %s ", self.band.name, data)
 
-        # create a stats data variable
-        stats_var = None
-        odata = self.initialise_odata(dtype)
-        if self.dataset_type.name == "TCI":
-            odata = self.do_compute(tci_data, odata, dtype)
-        else:
-            odata = self.do_compute(data, odata, dtype)
-        # variable name
-        stats_var = str(self.statistic.name).lower()
-        if stats_var == "standard_deviation":
-            stats_var = "std_dev"
-        if stats_var == "count_observed":
-            stats_var = "count"
-        stats_var = stats_var + "_" + self.acq_min.strftime("%Y")
-        data = data.isel(time=0).drop('time')
-        data.data = odata
-        stats_dataset = data.to_dataset(name=stats_var)
-        if self.band.name in [t.name for t in Ls57Arg25Bands]:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' +
-                                                           band_data.attrs.get('long_name')))
-            stats_dataset.attrs = band_data.attrs
-        else:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' +
-                                                           self.dataset_type.name + ' datasets'))
-            if (self.dataset_type.name).lower() == "evi":
-                stats_dataset.get(stats_var).attrs.update(dict(Comment='Parameters ' +
-                                                               str(self.evi_args) +
-                                                               ' for G,L,C1,C2 are used respectively'))
-            if (self.dataset_type.name).lower() == "tci":
-                stats_dataset.get(stats_var).attrs.update(dict(Comment='This is based on  ' +
-                                                               self.band.name + ' algorithm'))
-        if self.season:
-            stats_dataset.get(stats_var).attrs.update(dict(long_name=str(self.statistic.name).lower() +
-                                                           ' seasonal statistics for ' +
-                                                           str(self.season.name).lower() + ' of ' +
-                                                           str("_".join(self.satellites)).lower()))
-            stats_dataset.get(stats_var).attrs.update(dict(standard_name=str(self.statistic.name).lower() +
-                                                           '_' + str(self.season.name).lower() + '_season_' +
-                                                           str("_".join(self.satellites)).lower()))
-        else:
-            stats_dataset.get(stats_var).attrs.update(dict(long_name=str(self.statistic.name).lower() +
-                                                           ' statistics for ' +
-                                                           str("_".join(self.satellites)).lower() +
-                                                           ' and duration  ' + self.acq_min.strftime("%Y%mm%dd") + '-' +
-                                                           self.acq_max.strftime("%Y%mm%dd")))
-            stats_dataset.get(stats_var).attrs.update(dict(standard_name=str(self.statistic.name).lower() +
-                                                           '_' + self.acq_min.strftime("%Y%mm%dd") + '-' +
-                                                           self.acq_max.strftime("%Y%mm%dd") + '_' +
-                                                           str("_".join(self.satellites)).lower()))
-        if 'PERCENTILE' in self.statistic.name:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment2='Percentile method used ' +
-                                                           self.interpolation.name))
-        stats_dataset.get(stats_var).attrs.update(dict(units='metre', _FillValue='-999', grid_mapping="crs"))
-        stats_dataset.attrs.update(dict(descriptor))
-        crs_attr = self.write_crs_attributes(index, storage_type, crs_spatial_ref)
-        crs_variable = {'crs': 0}
-        # create crs variable
-        stats_dataset = stats_dataset.assign(**crs_variable)
-        # global attributes
-        stats_dataset.crs.attrs = crs_attr
-        _log.info("stats is ready for %s (%d, %d) for %s %s", self.dataset_type.name, self.x_cell, self.y_cell,
-                  self.band.name, self.statistic.name)
-        return stats_dataset, stats_var
+        observation_count = dict()
+        shape = (4000, 4000)
+        for i in MaskProduct:
+            observation_count[i] = np.zeros(shape=shape, dtype=np.int16)
+        pqdata = data['pixelquality'].values
+        _log.info("\tloading pq dataset for %3d %4d on %s", self.x, self.y, self.dataset_type.name)
+        pqmaskdata = np.ma.array(pqdata)
+        _log.info("\t pqmaskdata is %s", pqmaskdata)
+        observ_all = np.ma.count(pqmaskdata, axis=0)
+
+        for i in MaskProduct:
+            pqmaskdata.mask = np.ma.nomask
+            if i.name == "TOTAL_OBS":
+                observation_count[i] = observ_all
+            else:
+                pqmaskdata.mask = pqmaskdata & i.value == i.value
+                _log.info("\t pqmaskdata is %s value %d", pqmaskdata, i.value)
+                observation_count[i] = np.ma.count_masked(pqmaskdata, axis=0)
+                # Be aware above array converted into int64
+                observation_count[i] = observation_count[i].astype('int16')
+                _log.info("\t masked count for %s data %s dtype %s", i.name, observation_count[i],
+                          observation_count[i].dtype)
+        # get pq object  and drop vars and time
+        data = data.pixelquality.isel(time=0).drop('time')
+        all_vars = dict()
+        tmp_vars = dict()
+        dtype = np.int16
+        # create a dictionary of count variables
+        for i in MaskProduct:
+            stats_var = i.name
+            stats_var = stats_var + "_" + self.acq_min.strftime("%Y")
+
+            data.data = observation_count[i]
+            _log.info("\t zzz masked count  for %s data %s dtype %s", i.name, data.data, data.dtype)
+            data.attrs.clear()
+            stats_dataset = data.to_dataset(name=stats_var)
+            tmp_vars = {stats_var: {'zlib': True}}
+            all_vars.update(tmp_vars)
+            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Count calculated on pq datasets for bits ' +
+                                                           i.name))
+            if self.season:
+                stats_dataset.get(stats_var).attrs.update(dict(long_name='pq count for ' +
+                                                               str("_".join(self.satellites)).lower() + ' data of ' +
+                                                               str(self.season.name).lower()))
+                stats_dataset.get(stats_var).attrs.update(dict(standard_name='pq_count_' +
+                                                               str(self.season.name).lower() + '_season_' +
+                                                               str("_".join(self.satellites)).lower()))
+            else:
+                stats_dataset.get(stats_var).attrs.update(dict(long_name='pq count reporting for ' +
+                                                               str("_".join(self.satellites)).lower() +
+                                                               ' and duration  ' +
+                                                               self.acq_min.strftime("%Y%mm%dd") + '-' +
+                                                               self.acq_max.strftime("%Y%mm%dd")))
+                stats_dataset.get(stats_var).attrs.update(dict(standard_name='pq_count_' +
+                                                               self.acq_min.strftime("%Y%mm%dd") + '-' +
+                                                               self.acq_max.strftime("%Y%mm%dd") + '_' +
+                                                               str("_".join(self.satellites)).lower()))
+
+            stats_dataset.get(stats_var).attrs.update(dict(units='metre', _FillValue='0', grid_mapping="crs"))
+
+            stats_dataset.attrs.update(dict(descriptor))
+            crs_attr = self.write_crs_attributes(index, storage_type, crs_spatial_ref)
+            crs_variable = {'crs': 0}
+            stats_dataset = stats_dataset.assign(**crs_variable)
+            # global attributes
+            stats_dataset.crs.attrs = crs_attr
+            self.coordinate_attr_update(stats_dataset)
+            _log.info("stats is ready to write for %s %s (%d, %d) ", stats_var, self.dataset_type.name, self.x, self.y)
+            if i.name == "TOTAL_OBS":
+                stats_dataset.to_netcdf(filename, mode='w', format='NETCDF4', engine='netcdf4',
+                                        encoding={stats_var: {'zlib': True}})
+            else:
+                count_ds = xr.open_dataset(filename)
+                newds = count_ds.merge(stats_dataset)
+                newds.load()
+                count_ds.close()
+                newds.to_netcdf(filename, format='NETCDF4', engine='netcdf4', encoding=all_vars)
+        return
 
     def coordinate_attr_update(self, stats_dataset):
 
@@ -770,18 +620,9 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
 
         _log.info("Doing band [%s] statistic [%s] ", self.band.name, self.statistic.name)
         filename = self.output().path
-        dtype = np.float32
-        if self.band.name in [t.name for t in Ls57Arg25Bands] or str(self.statistic.name) == "COUNT_OBSERVED":
-            dtype = np.int16
-        stats_dataset, stats_var = self.data_write(dtype)
-        # update x and y coordinates axis/name attributes to silence gdal warning like "Longitude/X dimension"
-        self.coordinate_attr_update(stats_dataset)
-        # stats_dataset.to_netcdf(filename, mode='w', format='NETCDF4', engine='netcdf4',
-        #       encoding={stats_var:{'dtype': dtype, 'scale_factor': 0.1, 'add_offset': 5, 'zlib': True,
-        #  '_FillValue':-999}})
-        stats_dataset.to_netcdf(filename, mode='w', format='NETCDF4', engine='netcdf4',
-                                encoding={stats_var: {'zlib': True}})
+        dtype = np.int16
+        self.data_write(dtype)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    StatsTask().run()
+    PQCountTask().run()
