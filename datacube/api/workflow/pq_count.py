@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # ===============================================================================
-# Copyright (c)  2014 Geoscience Australia
+# Copyright (c)  2016 Geoscience Australia
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -42,30 +42,25 @@ import sys
 from collections import namedtuple
 from itertools import product
 from datetime import datetime
+import abc
 from enum import Enum
 import dask
 import numpy as np
 import xarray as xr
 import luigi
-from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, PERCENTILE, writeable_dir
-from datacube.api.utils_v1 import pqa_mask_arg, statistic_arg, season_arg, calculate_stack_statistic_median
+from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, writeable_dir
+from datacube.api.utils_v1 import pqa_mask_arg, season_arg
 from datacube.api.model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
 from datacube.api.model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
 from datacube.api.model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
 from datacube.api.utils_v1 import PercentileInterpolation, SEASONS
-from datacube.api.utils_v1 import Season, NDV, build_season_date_criteria
-from datacube.api.utils_v1 import calculate_stack_statistic_count_observed
-from datacube.api.utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
-from datacube.api.utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
-from datacube.api.utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
-#from datacube.api.workflow_setup import Task
+from datacube.api.utils_v1 import Season, build_season_date_criteria
 from datacube.index import index_connect
 # from datacube.api import make_mask, list_flag_names
 from datacube.storage.storage import GeoBox
 import datacube.api
 
 dask.set_options(get=dask.async.get_sync)
-# dask.set_options(get=dask.threaded.get)
 _log = logging.getLogger()
 
 _log.setLevel(logging.DEBUG)
@@ -156,9 +151,9 @@ def percentile_interpolation_arg(s):
                                      .format(s))
 
 
-class Task(luigi.Task):
-
+class Task(luigi.Task):       # pylint: disable=metaclass-assignment
     __metaclass__ = abc.ABCMeta
+
     def complete(self):
         from luigi.task import flatten
 
@@ -170,6 +165,9 @@ class Task(luigi.Task):
                 return False
         return True
 
+    @abc.abstractmethod
+    def output(self):
+        return
 
 class PQCountTask(object):       # pylint: disable=too-many-instance-attributes
     def __init__(self, name="Pixel Quality Count Workflow"):
@@ -369,10 +367,10 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
     acq_max = luigi.DateParameter()
     season = luigi.Parameter()
     # epochs = luigi.Parameter(is_list=True, significant=False)
-    satellites = luigi.Parameter(is_list=True)
+    satellites = luigi.Parameter()
     dataset_type = luigi.Parameter()
-    mask_pqa_apply = luigi.BooleanParameter()
-    mask_pqa_mask = luigi.Parameter(is_list=True)
+    mask_pqa_apply = luigi.BoolParameter()
+    mask_pqa_mask = luigi.Parameter()
     chunk_size = luigi.IntParameter()
     output_directory = luigi.Parameter()
 
@@ -480,7 +478,6 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
         geo_extents = geobox.geographic_extent.to_crs('EPSG:4326').points
         geo_extents = geo_extents + [geo_extents[0]]
         geospatial_bounds = "POLYGON((" + ", ".join("{0} {1}".format(*p) for p in geo_extents) + "))"
-        geospatial_bounds_crs = "EPSG:4326"
         long_name = geobox.geographic_extent.crs.GetAttrValue('GEOGCS')
         extents = {
             'Conventions': 'CF-1.6, ACDD-1.3',
@@ -519,7 +516,8 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
         dc = datacube.api.API(index, app="pixelQual-count-app")
         _log.info("\tcalling dataset for %3d %4d on in the date range  %s %s for satellite %s",
                   self.x_cell, self.y_cell, mindt, maxdt, self.satellites)
-        data = dc.get_dataset_by_cell((self.x, self.y), product='pqa', platform=self.satellites, time=(mindt, maxdt))
+        data = dc.get_dataset_by_cell((self.x_cell, self.y_cell), product='pqa',
+                                      platform=self.satellites, time=(mindt, maxdt))
         if data:
             _log.info("\t pq dataset shape reurned %s", data.pixelquality.shape)
         else:
@@ -528,7 +526,6 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
         storage_type = data.storage_type
         descriptor = self.write_geographical_extents_attributes(index, storage_type)
         stats_dataset = None
-        mask_clear = None
         ga_good_pixel = {'band_5_saturated': False,
                          'band_6_1_saturated': False,
                          'cloud_shadow_acca': False,
@@ -548,9 +545,8 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
         for i in MaskProduct:
             observation_count[i] = np.zeros(shape=shape, dtype=np.int16)
         pqdata = data['pixelquality'].values
-        _log.info("\tloading pq dataset for %3d %4d on %s", self.x, self.y, self.dataset_type.name)
+        _log.info("\tloading pq dataset for %3d %4d on %s", self.x_cell, self.y_cell, self.dataset_type.name)
         pqmaskdata = np.ma.array(pqdata)
-        _log.info("\t pqmaskdata is %s", pqmaskdata)
         observ_all = np.ma.count(pqmaskdata, axis=0)
 
         for i in MaskProduct:
@@ -559,24 +555,21 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
                 observation_count[i] = observ_all
             else:
                 pqmaskdata.mask = pqmaskdata & i.value == i.value
-                _log.info("\t pqmaskdata is %s value %d", pqmaskdata, i.value)
                 observation_count[i] = np.ma.count_masked(pqmaskdata, axis=0)
                 # Be aware above array converted into int64
                 observation_count[i] = observation_count[i].astype('int16')
-                _log.info("\t masked count for %s data %s dtype %s", i.name, observation_count[i],
-                          observation_count[i].dtype)
+                _log.info("\t masked count for %s data %s value %d", i.name, observation_count[i],
+                          i.value)
         # get pq object  and drop vars and time
         data = data.pixelquality.isel(time=0).drop('time')
         all_vars = dict()
         tmp_vars = dict()
-        dtype = np.int16
         # create a dictionary of count variables
         for i in MaskProduct:
             stats_var = i.name
             stats_var = stats_var + "_" + self.acq_min.strftime("%Y")
 
             data.data = observation_count[i]
-            _log.info("\t zzz masked count  for %s data %s dtype %s", i.name, data.data, data.dtype)
             data.attrs.clear()
             stats_dataset = data.to_dataset(name=stats_var)
             tmp_vars = {stats_var: {'zlib': True}}
@@ -610,7 +603,8 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
             # global attributes
             stats_dataset.crs.attrs = crs_attr
             self.coordinate_attr_update(stats_dataset)
-            _log.info("stats is ready to write for %s %s (%d, %d) ", stats_var, self.dataset_type.name, self.x, self.y)
+            _log.info("COUNT is ready to write for %s %s (%d, %d) ", stats_var, self.dataset_type.name,
+                      self.x_cell, self.y_cell)
             if i.name == "TOTAL_OBS":
                 stats_dataset.to_netcdf(filename, mode='w', format='NETCDF4', engine='netcdf4',
                                         encoding={stats_var: {'zlib': True}})
@@ -631,8 +625,7 @@ class EpochCountTask(Task):     # pylint: disable=abstract-method
 
     def run(self):
 
-        _log.info("Doing band [%s] statistic [%s] ", self.band.name, self.statistic.name)
-        filename = self.output().path
+        _log.info("Doing PQ counts")
         dtype = np.int16
         self.data_write(dtype)
 

@@ -1,0 +1,25 @@
+#PBS -N STATS_COUNT
+#PBS -P u46
+#PBS -q express
+#PBS -l walltime=01:00:00,ncpus=16,mem=32GB
+#PBS -l wd
+
+PYTHONPATH=$HOME/ga-repository/agdcV2:$PYTHONPATH
+SODIR="/g/data/u46/users/bxb547/bb/output/stats/NDVI_STATS"
+CODIR="/g/data/u46/users/bxb547/bb/output/stats/PQ_COUNTS"
+EXECST="$HOME/ga-repository/agdcV2/datacube/api/workflow/stats_for_all.py"
+EXECCT="$HOME/ga-repository/agdcV2/datacube/api/workflow/pq_count.py"
+
+#activate virtual environment
+source $HOME/venvmodules.sh
+
+STATS=" --x-min 12 --y-min -38  --output-directory $SODIR --season CALENDAR_YEAR --satellite LANDSAT_8 --dataset-type NDVI --band NDVI --statistic  MIN MAX STANDARD_DEVIATION --chunk-size 250  --epoch 1 1 --acq-min 2013 --acq-max 2013  --local-scheduler --mask-pqa-apply --mask-pqa-mask PQ_MASK_CLEAR  --workers 3 --interpolation NEAREST"
+
+COUNT=" --x-min -11 --y-min -33  --output-directory $CODIR --season CALENDAR_YEAR --satellite LANDSAT_8 --dataset-type pqa --epoch 1 1 --acq-min 2013 --acq-max 2013  --local-scheduler --mask-pqa-apply --mask-pqa-mask PQ_MASK_CLEAR  --workers 1"
+
+python "$EXECST"$STATS &
+
+#python "EXECCT"$COUNT &
+
+echo done
+wait

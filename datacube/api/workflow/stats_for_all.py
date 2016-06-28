@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 # ===============================================================================
-# Copyright (c)  2014 Geoscience Australia
+# Copyright (c)  2016 Geoscience Australia
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -47,7 +47,8 @@ from enum import Enum
 import dask
 import numpy as np
 import luigi
-from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, PERCENTILE, writeable_dir
+from luigi.task import flatten
+from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, writeable_dir
 from datacube.api.utils_v1 import pqa_mask_arg, statistic_arg, season_arg, calculate_stack_statistic_median
 from datacube.api.model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
 from datacube.api.model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
@@ -139,11 +140,10 @@ def percentile_interpolation_arg(s):
                                      .format(s))
 
 
-class Task(luigi.Task):
-
+class Task(luigi.Task):         # pylint: disable=metaclass-assignment
     __metaclass__ = abc.ABCMeta
+
     def complete(self):
-        from luigi.task import flatten
 
         for output in flatten(self.output()):
             if not output.exists():
@@ -152,6 +152,10 @@ class Task(luigi.Task):
             if not dep.complete():
                 return False
         return True
+
+    @abc.abstractmethod
+    def output(self):
+        return
 
 
 class StatsTask(object):       # pylint: disable=too-many-instance-attributes
@@ -371,14 +375,14 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
     acq_max = luigi.DateParameter()
     season = luigi.Parameter()
     # epochs = luigi.Parameter(is_list=True, significant=False)
-    satellites = luigi.Parameter(is_list=True)
+    satellites = luigi.Parameter()
     dataset_type = luigi.Parameter()
     band = luigi.Parameter()
-    mask_pqa_apply = luigi.BooleanParameter()
-    mask_pqa_mask = luigi.Parameter(is_list=True)
+    mask_pqa_apply = luigi.BoolParameter()
+    mask_pqa_mask = luigi.Parameter()
     chunk_size = luigi.IntParameter()
     statistic = luigi.Parameter()
-    statistics = luigi.Parameter(is_list=True)
+    statistics = luigi.Parameter()
     interpolation = luigi.Parameter()
     output_directory = luigi.Parameter()
     evi_args = luigi.FloatParameter()
@@ -487,7 +491,6 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
         geo_extents = geobox.geographic_extent.to_crs('EPSG:4326').points
         geo_extents = geo_extents + [geo_extents[0]]
         geospatial_bounds = "POLYGON((" + ", ".join("{0} {1}".format(*p) for p in geo_extents) + "))"
-        geospatial_bounds_crs = "EPSG:4326"
         long_name = geobox.geographic_extent.crs.GetAttrValue('GEOGCS')
         extents = {
             'Conventions': 'CF-1.6, ACDD-1.3',
@@ -707,7 +710,7 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
             tci_data = self.get_derive_data(data, pq, mask_clear)
             data = data.band_1
         else:
-            data = self.get_derive_data(data, pq, mask_clear)
+            data = self.get_derive_data(data, pq, mask_clear)      # pylint: disable=redefined-variable-type
             _log.info("Received band %s data is %s ", self.band.name, data)
 
         # create a stats data variable
