@@ -79,6 +79,7 @@ class PqaMask(Enum):
                 PQ_MASK_CONTIGUITY PQ_MASK_LAND PQ_MASK_CLOUD PQ_MASK_CLOUD_ACCA PQ_MASK_CLOUD_FMASK \
                 PQ_MASK_CLOUD_SHADOW_ACCA PQ_MASK_CLOUD_SHADOW_FMASK"
     PQ_MASK_CLEAR = 16383               # bits 0 - 13 set
+    PQ_MASK_CLEAR_ELB = 15871           # Exclude land bit
     PQ_MASK_SATURATION = 255            # bits 0 - 7 set
     PQ_MASK_SATURATION_OPTICAL = 159    # bits 0-4 and 7 set
     PQ_MASK_SATURATION_THERMAL = 96     # bits 5,6 set
@@ -306,30 +307,6 @@ def format_date_time(d):
     return None
 
 
-def extract_feature_geometry_wkb(vector_file, vector_layer=0, vector_feature=0, epsg=4326):
-
-    import ogr
-    import osr
-    from gdalconst import GA_ReadOnly
-
-    vector = ogr.Open(vector_file, GA_ReadOnly)
-    assert vector
-
-    layer = vector.GetLayer(vector_layer)
-    assert layer
-
-    feature = layer.GetFeature(vector_feature)
-    assert feature
-
-    projection = osr.SpatialReference()
-    projection.ImportFromEPSG(epsg)
-    geom = feature.GetGeometryRef()
-    # Transform if required
-    if not projection.IsSame(geom.GetSpatialReference()):
-        geom.TransformTo(projection)
-    return geom.ExportToWkb()
-
-
 def maskify_stack(stack, ndv=NDV):
     if numpy.isnan(ndv):
         return numpy.ma.masked_invalid(stack, copy=False)
@@ -471,7 +448,7 @@ class Month(Enum):
 
 
 class Season(Enum):
-    __order__ = "SPRING SUMMER AUTUMN WINTER CALENDAR_YEAR FINANCIAL_YEAR APR_TO_SEP QTR_1 QTR_2 QTR_3 QTR_4"
+    __order__ = "SPRING SUMMER AUTUMN WINTER CALENDAR_YEAR FINANCIAL_YEAR APR_TO_SEP QTR_1 QTR_2 QTR_3 QTR_4 TIDAL DUMMY"
 
     SPRING = "SPRING"
     SUMMER = "SUMMER"
@@ -485,6 +462,8 @@ class Season(Enum):
     QTR_2 = "APR_JUN"
     QTR_3 = "JUL_SEP"
     QTR_4 = "OCT_DEC"
+    TIDAL = "TIDAL"
+    DUMMY = "DUMMY"
 
 
 class Quarter(Enum):
@@ -508,7 +487,9 @@ SEASONS = {
     Season.QTR_1: ((Month.JANUARY, 1), (Month.MARCH, 31)),
     Season.QTR_2: ((Month.APRIL, 1), (Month.JUNE, 30)),
     Season.QTR_3: ((Month.JULY, 1), (Month.SEPTEMBER, 30)),
-    Season.QTR_4: ((Month.OCTOBER, 1), (Month.DECEMBER, 31))
+    Season.QTR_4: ((Month.OCTOBER, 1), (Month.DECEMBER, 31)),
+    Season.TIDAL: ((Month.JANUARY, 1), (Month.JANUARY, 1)),
+    Season.DUMMY: ((Month.DECEMBER, 1), (Month.DECEMBER, 31))
 }
 
 
@@ -533,7 +514,11 @@ def build_season_date_criteria(acq_min, acq_max, season, extend=True):
 
     seasons = SEASONS
     (month_start, day_start), (month_end, day_end) = seasons[season]
-
+    if season.name == 'DUMMY':
+        month_start = Month(acq_min.month)
+        month_end = Month(acq_max.month)
+        day_start = acq_min.day
+        day_end = acq_max.day
     return build_date_criteria(acq_min, acq_max, month_start, day_start, month_end, day_end, extend=extend)
 
 
