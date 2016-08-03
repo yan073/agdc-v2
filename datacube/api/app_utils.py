@@ -4,25 +4,31 @@ import logging
 import numpy as np
 from collections import defaultdict
 from itertools import product
-from datetime import datetime
+from datetime import datetime, timedelta
 from copy import deepcopy
 from pathlib import Path
 from pandas import to_datetime
+import rasterio
+import dateutil.tz
 from datacube.storage.storage import write_dataset_to_netcdf
+from datacube.storage.masking import make_mask
+from datacube.api.geo_xarray import append_solar_day, _get_spatial_dims
 from datacube.utils import intersect_points, union_points
 from datacube.utils import read_documents
 from datacube.model import DatasetType, GeoPolygon
 from datacube.model.utils import make_dataset, xr_apply, datasets_to_doc
+from datacube.api.model_v1 import Ls57Arg25Bands
 from datacube.api.tci_utils import calculate_tci
 from datacube.api.utils_v1 import calculate_stack_statistic_count_observed, calculate_stack_statistic_median
 from datacube.api.utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
 from datacube.api.utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
 from datacube.api.utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
+from dateutil.tz import tzutc, tzlocal
 
 _log = logging.getLogger(__name__)
 
 
-def product_lookup(self, dataset_type):
+def product_lookup(sat, dataset_type):
     """
     Finds product name from dataset type and sensor name
     :param self: input dataset type and sensor name
@@ -43,15 +49,14 @@ def product_lookup(self, dataset_type):
     for k, v in prod_list:
         my_dict[k].append(v)
     for k, v in my_dict.iteritems():
-        if self.satellites[0] in v[0] and dataset_type in v[1]:
+        if sat in v[0] and dataset_type in v[1]:
             return k
     return None
 
 
 def write_crs_attributes(geobox):
 
-    extents = {
-               'grid_mapping_name': geobox.crs['PROJECTION'].lower(),
+    extents = {'grid_mapping_name': geobox.crs['PROJECTION'].lower(),
                'semi_major_axis': str(geobox.geographic_extent.crs.semi_major_axis),
                'semi_minor_axis': str(geobox.geographic_extent.crs.semi_major_axis),
                'inverse_flattening': str(geobox.geographic_extent.crs.inverse_flattening),
@@ -61,12 +66,12 @@ def write_crs_attributes(geobox):
                'longitude_of_central_meridian': str(geobox.crs.proj.longitude_of_center),
                'long_name': geobox.crs['PROJCS'],
                'standard_parallel': str((geobox.crs.proj.standard_parallel_1,
-                                     geobox.crs.proj.standard_parallel_2)),
+                                         geobox.crs.proj.standard_parallel_2)),
                'GeoTransform': geobox.affine.to_gdal(),
                'spatial_ref': geobox.crs.wkt,
                'geographic': str(geobox.crs.geographic),
                'projected': str(geobox.crs.projected)
-             }
+              }
     return extents
 
 
@@ -103,24 +108,23 @@ def write_global_attributes(self, geobox):
 def do_compute(self, data, odata, dtype):     # pylint: disable=too-many-branches
 
     _log.info("doing computations for %s on  %s of on odata shape %s",
-                  self.statistic.name, datetime.now(), odata.shape)
+              self.statistic.name, datetime.now(), odata.shape)
     ndv = np.nan
     # pylint: disable=range-builtin-not-iterating
     for x_offset, y_offset in product(range(0, 4000, 4000),
                                       range(0, 4000, self.chunk_size)):
-        if self.dataset_type.name == "TCI":
-            stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
-        else:
-            stack = data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+self.chunk_size)).load().data
+        # if self.dataset_type.name == "TCI":
+        #    stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
+        # else:
+        #    stack = data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+self.chunk_size)).load().data
+        stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
         _log.info("stack stats shape %s for %s for (%03d ,%03d) x_offset %d for y_offset %d",
                   stack.shape, self.band.name, self.x_cell, self.y_cell, x_offset, y_offset)
         stack_stat = None
         if self.statistic.name == "MIN":
             stack_stat = calculate_stack_statistic_min(stack=stack, ndv=ndv, dtype=dtype)
-                # data = data.reduce(numpy.nanmin, axis=0)
-                # odata = odata.min(axis=0, skipna='True')
         elif self.statistic.name == "MAX":
-             stack_stat = calculate_stack_statistic_max(stack=stack, ndv=ndv, dtype=dtype)
+            stack_stat = calculate_stack_statistic_max(stack=stack, ndv=ndv, dtype=dtype)
         elif self.statistic.name == "MEAN":
             stack_stat = calculate_stack_statistic_mean(stack=stack, ndv=ndv, dtype=dtype)
         elif self.statistic.name == "GEOMEDIAN":
@@ -144,7 +148,128 @@ def do_compute(self, data, odata, dtype):     # pylint: disable=too-many-branche
 
         odata[y_offset:y_offset+self.chunk_size, x_offset:4000] = stack_stat
         _log.info("stats finished for (%03d, %03d) band %s on %s", self.x_cell, self.y_cell, self.band.name, odata)
-        return odata
+    return odata
+
+
+def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-locals,too-many-branches
+    # pylint: disable=too-many-statements
+    my_cell = (self.x_cell, self.y_cell)
+    my_data = defaultdict()
+    tdata = None
+    # first collect datasets for each satellite
+    for ls in list(self.satellites):
+        prodname = product_lookup(ls, self.dataset_type.value.lower())
+        cell_info = gw.list_cells(my_cell, product=prodname, time=(mindt, maxdt))
+        my_data[ls] = cell_info
+        for k, v in cell_info.iteritems():
+            _log.info("\t data sources for satellite %s %s", ls, v)
+
+    ls_stack = np.zeros((1, 1, 1), dtype=dtype)
+    cell_list_obj = None
+    origattr = None
+    for ls in list(self.satellites):
+        _log.info("\tloading dataset for %3d %4d on band  %s stats  %s  in the date range  %s %s for satellite %s",
+                  self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, ls)
+        prodname = product_lookup(ls, self.dataset_type.value.lower())
+        pq = None
+        cell_info = my_data[ls]
+        if cell_info[my_cell]:
+            cell_list_obj = cell_info[my_cell]
+            data = gw.load(cell_list_obj, dask_chunks={'time': len(cell_list_obj['sources']),
+                                                       'y': self.chunk_size, 'x': self.chunk_size})
+        else:
+            _log.info("\t No data found for (%d %d) in the date range  %s %s", self.x_cell, self.y_cell,
+                      mindt, maxdt)
+            continue
+        origattr = data.attrs
+        mask_clear = None
+        if self.mask_pqa_apply:
+            prodname = product_lookup(ls, 'pqa')
+            pq = gw.list_cells(my_cell, product=prodname, time=(mindt, maxdt))
+            if pq:
+                _log.info("\tloading pq dataset for %3d %4d on band  %s stats  %s from  %s to %s for satellite %s",
+                          self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, ls)
+                pq = gw.load(pq[my_cell], dask_chunks={'time': len(pq[my_cell]['sources']),
+                                                       'y': self.chunk_size, 'x': self.chunk_size})
+                for mask in self.mask_pqa_mask:
+                    if mask.name == "PQ_MASK_CLEAR_ELB":
+                        mask_clear = pq['pixelquality'] & 15871 == 15871
+                    elif mask.name == "PQ_MASK_CLEAR":
+                        mask_clear = pq['pixelquality'] & 16383 == 16383
+                    else:
+                        mask_clear = make_mask(pq, apply_mask())
+                data = data.where(mask_clear)
+            else:
+                _log.info("\t No PQ data exists")
+            _log.info("\tpq dataset call completed for %3d %4d on band  %s stats  %s pqdata %s",
+                      self.x_cell, self.y_cell, self.band.name, self.statistic.name, pq)
+
+        append_solar_day(data, get_mean_longitude(data))
+        data = data.groupby('solar_day').max(dim='time')
+        season_dict = {'SUMMER': 'DJF', 'AUTUMN': 'MAM', 'WINTER': 'JJA', 'SPRING': 'SON',
+                       'CALENDAR_YEAR': 'year', 'QTR_1': '1', 'QTR_2': '2',
+                       'QTR_3': '3', 'QTR_4': '4'}
+        if "QTR" in self.season.name:
+            data = data.isel(solar_day=data.groupby('solar_day.quarter').groups[int(season_dict[self.season.name])])
+        elif "CALENDAR" in self.season.name:
+            year = int(str(data.groupby('solar_day.year').groups.keys()).strip('[]'))
+            data = data.isel(solar_day=data.groupby('solar_day.year').groups[year])
+        elif self.season.name == "TIDAL":
+            # extract each landsat time series
+            lsdata = None
+            ls_list = list()
+            for xx in self.date_list:
+                if xx[2] == ls.rsplit('_', 1)[1]:
+                    ls_list.append(xx)
+            if len(ls_list) >= 1:
+                lsdata = [xx[4:] for xx in ls_list]
+                # change into local time
+                from_zone = dateutil.tz.tzutc()
+                lsdata = [datetime.strptime(xx,
+                                            "%Y-%m-%dT%H:%M:%S").replace(tzinfo=from_zone).astimezone(tzlocal()).date()
+                          for xx in lsdata]
+                # now check and get the correct dates after PQ applied
+                sol_lsdata = list()
+                if pq:
+                    solar_day_date = data.solar_day.values.astype('datetime64[D]').tolist()
+                    solar_day_date = [dt for dt in solar_day_date]
+                    for dt in lsdata:
+                        if dt in solar_day_date:
+                            sol_lsdata.append(dt)
+                else:
+                    sol_lsdata = lsdata
+                data = data.sel_points(solar_day=sol_lsdata)
+                tdata = data
+                _log.info("Received band %s data is %s ", self.band.name, data)
+            else:
+                _log.info("\t No Landsat data for %s", ls)
+                continue
+            _log.info("Tidal datasets constructed")
+        else:
+            data = data.isel(solar_day=data.groupby('solar_day.season').groups[season_dict[self.season.name]])
+        tci_data = None
+        if self.band.name in [t.name for t in Ls57Arg25Bands]:
+            data = get_band_data(self, data)
+            # data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
+        else:
+            data = get_derive_data(self, data)
+
+        stack = np.zeros((len(data), 4000, 4000), dtype=dtype)
+        _log.info("\t Time to start stacking for %s %s", ls, str(datetime.now()))
+        for x_offset, y_offset in product(range(0, 4000, 4000),
+                                          range(0, 4000, 400)):
+            stack[:, y_offset:y_offset+400, x_offset:4000] =  \
+                 data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+400)).load().data
+            _log.info("\t Time to stack 400 chunks  %s ", str(datetime.now()))
+        _log.info("\t Time to finish stacking for %s %s", ls, str(datetime.now()))
+        if ls_stack.any():
+            ls_stack = np.vstack((stack, ls_stack))
+        else:
+            ls_stack = stack
+    if self.season.name == "TIDAL":
+        return tdata, ls_stack, cell_list_obj, origattr
+    else:
+        return data, ls_stack, cell_list_obj, origattr
 
 
 def get_derive_data(self, data):
@@ -158,27 +283,27 @@ def get_derive_data(self, data):
     nir = data.nir
     sw1 = data.swir1
     sw2 = data.swir2
-    if self.dataset_type.name == "NDFI":
+    if self.band.name == "NDFI":
         ndvi = (sw1 - nir) / (sw1 + nir)
         ndvi.name = "NDFI data"
-    if self.dataset_type.name == "NDVI":
+    if self.band.name == "NDVI":
         ndvi = (nir - red) / (nir + red)
         ndvi.name = "NDVI data"
-    if self.dataset_type.name == "NDWI":
+    if self.band.name == "NDWI":
         ndvi = (green - nir) / (green + nir)
         ndvi.name = "NDWI data"
-    if self.dataset_type.name == "MNDWI":
+    if self.band.name == "MNDWI":
         ndvi = (green - sw1) / (green + sw1)
         ndvi.name = "MNDWI data"
-    if self.dataset_type.name == "NBR":
+    if self.band.name == "NBR":
         ndvi = (nir - sw2) / (nir + sw2)
         ndvi.name = "NBR data"
-    if self.dataset_type.name == "EVI":
+    if self.band.name == "EVI":
         g, l, c1, c2 = self.evi_args  # pylint: disable=unpacking-non-sequence
         ndvi = g * ((nir - red) / (nir + c1 * red - c2 * blue + l))
         ndvi.name = "EVI data"
         _log.info("EVI cooefficients used are G=%f, l=%f, c1=%f, c2=%f", g, l, c1, c2)
-    if self.dataset_type.name == "TCI":
+    if self.band.name == "TCI":
         ndvi = calculate_tci(self.band.name, sat, blue, green, red, nir, sw1, sw2)
         _log.info(" shape of TCI array is %s", ndvi.shape)
     return ndvi
@@ -203,38 +328,39 @@ def get_band_data(self, data):  # pylint: disable=too-many-branches
 
 def apply_mask(self):
 
-        ga_pixel_bit = {name: True for name in
-                        ('swir2_saturated',
-                         'red_saturated',
-                         'blue_saturated',
-                         'nir_saturated',
-                         'green_saturated',
-                         'tir_saturated',
-                         'swir1_saturated')}
-        ga_pixel_bit.update(dict(contiguous=False, land_sea='land', cloud_shadow_acca='no_cloud_shadow', cloud_acca=
-                                 'no_cloud', cloud_fmask='no_cloud', cloud_shadow_fmask='no_cloud_shadow'))
+    ga_pixel_bit = {name: True for name in
+                    ('swir2_saturated',
+                     'red_saturated',
+                     'blue_saturated',
+                     'nir_saturated',
+                     'green_saturated',
+                     'tir_saturated',
+                     'swir1_saturated')}
+    ga_pixel_bit.update(dict(contiguous=False, land_sea='land', cloud_shadow_acca='no_cloud_shadow',
+                             cloud_acca='no_cloud', cloud_fmask='no_cloud',
+                             cloud_shadow_fmask='no_cloud_shadow'))
 
-        for mask in self.mask_pqa_mask:
-            if mask.name == "PQ_MASK_CONTIGUITY":
-                ga_pixel_bit.update(dict(contiguous=True))
-            if mask.name == "PQ_MASK_CLOUD_FMASK":
-                ga_pixel_bit.update(dict(cloud_fmask='no_cloud'))
-            if mask.name == "PQ_MASK_CLOUD_ACCA":
-                ga_pixel_bit.update(dict(cloud_acca='no_cloud_shadow'))
-            if mask.name == "PQ_MASK_CLOUD_SHADOW_ACCA":
-                ga_pixel_bit.update(dict(cloud_shadow_acca='no_cloud_shadow'))
-            if mask.name == "PQ_MASK_SATURATION":
-                ga_pixel_bit.update(dict(blue_saturated=False, green_saturated=False, red_saturated=False,
-                                         nir_saturated=False, swir1_saturated=False, tir_saturated=False,
-                                         swir2_saturated=False))
-            if mask.name == "PQ_MASK_SATURATION_OPTICAL":
-                ga_pixel_bit.update(dict(blue_saturated=False, green_saturated=False, red_saturated=False,
-                                         nir_saturated=False, swir1_saturated=False, swir2_saturated=False))
-            if mask.name == "PQ_MASK_SATURATION_THERMAL":
-                ga_pixel_bit.update(dict(tir_saturated=False))
-            _log.info("applying bit mask %s on %s ", mask.name, ga_pixel_bit)
+    for mask in self.mask_pqa_mask:
+        if mask.name == "PQ_MASK_CONTIGUITY":
+            ga_pixel_bit.update(dict(contiguous=True))
+        if mask.name == "PQ_MASK_CLOUD_FMASK":
+            ga_pixel_bit.update(dict(cloud_fmask='no_cloud'))
+        if mask.name == "PQ_MASK_CLOUD_ACCA":
+            ga_pixel_bit.update(dict(cloud_acca='no_cloud_shadow'))
+        if mask.name == "PQ_MASK_CLOUD_SHADOW_ACCA":
+            ga_pixel_bit.update(dict(cloud_shadow_acca='no_cloud_shadow'))
+        if mask.name == "PQ_MASK_SATURATION":
+            ga_pixel_bit.update(dict(blue_saturated=False, green_saturated=False, red_saturated=False,
+                                     nir_saturated=False, swir1_saturated=False, tir_saturated=False,
+                                     swir2_saturated=False))
+        if mask.name == "PQ_MASK_SATURATION_OPTICAL":
+            ga_pixel_bit.update(dict(blue_saturated=False, green_saturated=False, red_saturated=False,
+                                     nir_saturated=False, swir1_saturated=False, swir2_saturated=False))
+        if mask.name == "PQ_MASK_SATURATION_THERMAL":
+            ga_pixel_bit.update(dict(tir_saturated=False))
+        _log.info("applying bit mask %s on %s ", mask.name, ga_pixel_bit)
 
-        return ga_pixel_bit
+    return ga_pixel_bit
 
 
 def config_loader(index, app_config_file):
@@ -356,3 +482,13 @@ def get_filename(config, tile_index, sources):
     return file_path_template.format(tile_index=tile_index,
                                      start_time=to_datetime(sources.time.values[0]).strftime('%Y%m%d%H%M%S%f'),
                                      end_time=to_datetime(sources.time.values[-1]).strftime('%Y%m%d%H%M%S%f'))
+
+
+def get_mean_longitude(cell_dataset):
+    x, y = _get_spatial_dims(cell_dataset)
+    mean_lat = float(cell_dataset[x][0] + cell_dataset[x][-1])/2.
+    mean_lon = float(cell_dataset[y][0] + cell_dataset[y][-1])/2.
+    bounds = {'left': mean_lon, 'right': mean_lon, 'top': mean_lat, 'bottom': mean_lat}
+    input_crs = cell_dataset.crs.wkt
+    left, bottom, right, top = rasterio.warp.transform_bounds(input_crs, 'EPSG:4326', **bounds)
+    return left
