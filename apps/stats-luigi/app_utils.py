@@ -9,7 +9,6 @@ from copy import deepcopy
 from pathlib import Path
 
 from functools import reduce
-from pandas import to_datetime
 import rasterio
 import dateutil.tz
 from datacube.storage.storage import write_dataset_to_netcdf
@@ -19,12 +18,12 @@ from datacube.utils import intersect_points, union_points
 from datacube.utils import read_documents
 from datacube.model import DatasetType, GeoPolygon
 from datacube.model.utils import make_dataset, xr_apply, datasets_to_doc
-from .model_v1 import Ls57Arg25Bands
-from .tci_utils import calculate_tci
-from .utils_v1 import calculate_stack_statistic_count_observed, calculate_stack_statistic_median
-from .utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
-from .utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
-from .utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
+from model_v1 import Ls57Arg25Bands
+from tci_utils import calculate_tci
+from utils_v1 import calculate_stack_statistic_count_observed, calculate_stack_statistic_median
+from utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
+from utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
+from utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
 from dateutil.tz import tzlocal
 
 _log = logging.getLogger(__name__)

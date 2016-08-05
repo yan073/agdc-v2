@@ -6,7 +6,7 @@ from __future__ import absolute_import
 import logging
 import numpy
 from enum import Enum
-from .utils_v1 import TasselCapIndex
+from utils_v1 import TasselCapIndex
 
 _log = logging.getLogger()
 

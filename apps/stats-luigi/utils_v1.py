@@ -11,10 +11,9 @@ from datetime import datetime, date
 from collections import namedtuple
 import calendar
 import numpy
-import gdalconst
 from dateutil.relativedelta import relativedelta
 from enum import Enum
-from .model_v1 import get_bands, Satellite, DatasetType
+from model_v1 import get_bands, Satellite, DatasetType
 
 
 _log = logging.getLogger(__name__)

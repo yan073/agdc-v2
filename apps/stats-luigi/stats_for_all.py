@@ -23,20 +23,20 @@ import numpy as np
 import luigi
 import luigi.contrib
 from luigi.task import flatten
-from .utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, writeable_dir
-from .utils_v1 import pqa_mask_arg, statistic_arg, season_arg
-from .model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
-from .model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
-from .model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
-from .utils_v1 import PercentileInterpolation, SEASONS
-from .utils_v1 import Season, NDV, build_season_date_criteria
+from utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, writeable_dir
+from utils_v1 import pqa_mask_arg, statistic_arg, season_arg
+from model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
+from model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
+from model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
+from utils_v1 import PercentileInterpolation, SEASONS
+from utils_v1 import Season, NDV, build_season_date_criteria
 
 import datacube.api
 from dateutil.relativedelta import relativedelta
 from datacube.api import GridWorkflow
-from .app_utils import product_lookup, write_crs_attributes, write_global_attributes
-from .app_utils import do_compute, config_loader
-from .app_utils import make_stats_config, stats_extra_metadata, fuse_data
+from app_utils import product_lookup, write_crs_attributes, write_global_attributes
+from app_utils import do_compute, config_loader
+from app_utils import make_stats_config, stats_extra_metadata, fuse_data
 
 dask.set_options(get=dask.async.get_sync)
 # dask.set_options(get=dask.threaded.get)
@@ -459,47 +459,41 @@ class EpochStatisticsTask(Task):  # pylint: disable=abstract-method
         stats_var_attrs = stats_dataset.get(stats_var).attrs
         stats_var_attrs.clear()
 
-        if self.band.name in [t.name for t in Ls57Arg25Bands]:
-            stats_var_attrs.update(dict(Comment1='Statistics calculated on ' +
-                                                 self.band.name + 'for ' +
-                                                 self.dataset_type.name))
-        else:
-            stats_var_attrs.update(dict(Comment1='Statistics calculated on ' +
-                                                 self.dataset_type.name + ' datasets'))
-            if self.dataset_type.name.lower() == "evi":
-                stats_var_attrs.update(dict(Comment='Parameters ' +
-                                                    str(self.evi_args) +
-                                                    ' for G,L,C1,C2 are used respectively'))
-            if self.dataset_type.name.lower() == "tci":
-                stats_var_attrs.update(dict(Comment='This is based on  ' +
-                                                    self.band.name + ' algorithm'))
-        if self.season:
-            stats_var_attrs.update(dict(long_name=str(self.statistic.name).lower() +
-                                                  ' seasonal statistics for ' +
-                                                  str(self.season.name).lower() + ' of ' +
-                                                  str("_".join(self.satellites)).lower()))
-            stats_var_attrs.update(dict(standard_name=str(self.statistic.name).lower() +
-                                                      '_' + str(
-                self.season.name).lower() + '_season_' +
-                                                      str("_".join(self.satellites)).lower()))
-        else:
-            stats_var_attrs.update(dict(long_name=str(self.statistic.name).lower() +
-                                                  ' statistics for ' +
-                                                  str("_".join(self.satellites)).lower() +
-                                                  ' and duration  ' + self.acq_min.strftime(
-                "%Y%mm%dd") + '-' +
-                                                  self.acq_max.strftime("%Y%mm%dd")))
-            stats_var_attrs.update(dict(standard_name=str(self.statistic.name).lower() +
-                                                      '_' + self.acq_min.strftime("%Y%mm%dd") + '-' +
-                                                      self.acq_max.strftime("%Y%mm%dd") + '_' +
-                                                      str("_".join(self.satellites)).lower()))
-        if 'PERCENTILE' in self.statistic.name:
-            stats_var_attrs.update(dict(Comment2='Percentile method used ' +
-                                                 self.interpolation.name))
+        self.update_variable_attrs(stats_var_attrs)
 
         _log.info("stats is ready for %s (%d, %d) for %s %s", self.dataset_type.name, self.x_cell, self.y_cell,
                   self.band.name, self.statistic.name)
         return stats_dataset, stats_var, cell_list_obj, origattr
+
+    def update_variable_attrs(self, stats_var_attrs):
+        if self.band.name in [t.name for t in Ls57Arg25Bands]:
+            stats_var_attrs['Comment1'] = 'Statistics calculated on ' + self.band.name + 'for ' + self.dataset_type.name
+        else:
+            stats_var_attrs['Comment1'] = 'Statistics calculated on ' + self.dataset_type.name + ' datasets'
+            if self.dataset_type.name.lower() == "evi":
+                stats_var_attrs['Comment'] = 'Parameters ' + str(self.evi_args) + ' for G,L,C1,C2 are used respectively'
+            if self.dataset_type.name.lower() == "tci":
+                stats_var_attrs['Comment'] = 'This is based on  ' + self.band.name + ' algorithm'
+        if self.season:
+            stats_var_attrs['long_name'] = (str(self.statistic.name).lower() +
+                                            ' seasonal statistics for ' +
+                                            str(self.season.name).lower() + ' of ' +
+                                            str("_".join(self.satellites)).lower())
+            stats_var_attrs['standard_name'] = (str(self.statistic.name).lower() +
+                                                '_' + str(self.season.name).lower() + '_season_' +
+                                                str("_".join(self.satellites)).lower())
+        else:
+            stats_var_attrs['long_name'] = (str(self.statistic.name).lower() +
+                                            ' statistics for ' +
+                                            str("_".join(self.satellites)).lower() +
+                                            ' and duration  ' + self.acq_min.strftime("%Y%mm%dd") + '-' +
+                                            self.acq_max.strftime("%Y%mm%dd"))
+            stats_var_attrs['standard_name'] = (str(self.statistic.name).lower() +
+                                                '_' + self.acq_min.strftime("%Y%mm%dd") + '-' +
+                                                self.acq_max.strftime("%Y%mm%dd") + '_' +
+                                                str("_".join(self.satellites)).lower())
+        if 'PERCENTILE' in self.statistic.name:
+            stats_var_attrs['Comment2'] = 'Percentile method used ' + self.interpolation.name
 
     def run(self):  # pylint: disable=too-many-locals
         dc = datacube.Datacube(app="stats-app")
