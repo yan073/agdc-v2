@@ -156,9 +156,12 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
     my_cell = (self.x_cell, self.y_cell)
     my_data = defaultdict()
     tdata = None
+    prodname = None
     # first collect datasets for each satellite
     for ls in list(self.satellites):
         prodname = product_lookup(ls, self.dataset_type.value.lower())
+        if prodname is None:
+            prodname = product_lookup(ls, 'nbar')
         cell_info = gw.list_cells(my_cell, product=prodname, time=(mindt, maxdt))
         my_data[ls] = cell_info
         for k, v in cell_info.iteritems():
@@ -170,7 +173,6 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
     for ls in list(self.satellites):
         _log.info("\tloading dataset for %3d %4d on band  %s stats  %s  in the date range  %s %s for satellite %s",
                   self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, ls)
-        prodname = product_lookup(ls, self.dataset_type.value.lower())
         pq = None
         cell_info = my_data[ls]
         if cell_info[my_cell]:
@@ -252,7 +254,7 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
             data = get_band_data(self, data)
             # data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
         else:
-            data = get_derive_data(self, data)
+            data = get_derive_data(self, ls, data)
 
         stack = np.zeros((len(data), 4000, 4000), dtype=dtype)
         _log.info("\t Time to start stacking for %s %s", ls, str(datetime.now()))
@@ -272,10 +274,9 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
         return data, ls_stack, cell_list_obj, origattr
 
 
-def get_derive_data(self, data):
+def get_derive_data(self, ls, data):
     ndvi = None
-    sat = ",".join(self.satellites)
-    _log.info("getting derived data for %s for satellite %s", self.dataset_type.name, sat)
+    _log.info("getting derived data for %s for satellite %s", self.dataset_type.name, ls)
 
     blue = data.blue
     green = data.green
@@ -303,8 +304,8 @@ def get_derive_data(self, data):
         ndvi = g * ((nir - red) / (nir + c1 * red - c2 * blue + l))
         ndvi.name = "EVI data"
         _log.info("EVI cooefficients used are G=%f, l=%f, c1=%f, c2=%f", g, l, c1, c2)
-    if self.band.name == "TCI":
-        ndvi = calculate_tci(self.band.name, sat, blue, green, red, nir, sw1, sw2)
+    if self.dataset_type.name == "TCI":
+        ndvi = calculate_tci(self.band.name, ls, blue, green, red, nir, sw1, sw2)
         _log.info(" shape of TCI array is %s", ndvi.shape)
     return ndvi
 

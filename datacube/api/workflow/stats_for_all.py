@@ -547,6 +547,8 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
 
         dc = datacube.Datacube(app="stats-app")
         prodname = product_lookup(self.satellites[0], self.dataset_type.value.lower())
+        if prodname is None:
+            prodname = product_lookup(self.satellites[0], 'nbar')
         _log.info("Doing band [%s] statistic [%s] for product [%s] ", self.band.name, self.statistic.name, prodname)
 
         app_config_file = '../config/' + prodname + '.yaml'
