@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Query datasets and storage units.
+Query datasets.
 """
 from __future__ import absolute_import
 from __future__ import print_function
@@ -27,14 +27,14 @@ def printable_values(d):
     return {k: printable(v) for k, v in d.items()}
 
 
-def write_pretty(out_f, fields, search_results, terminal_size=click.get_terminal_size()):
+def write_pretty(out_f, field_names, search_results, terminal_size=click.get_terminal_size()):
     """
     Output in a human-readable text format. Inspired by psql's expanded output.
     """
     terminal_width = terminal_size[0]
     record_num = 1
 
-    field_header_width = max([len(field_name) for field_name in fields])
+    field_header_width = max(map(len, field_names))
     field_output_format = '{:<' + str(field_header_width) + '} | {}'
 
     for result in search_results:
@@ -51,11 +51,11 @@ def write_pretty(out_f, fields, search_results, terminal_size=click.get_terminal
         record_num += 1
 
 
-def write_csv(out_f, fields, search_results):
+def write_csv(out_f, field_names, search_results):
     """
     Output as a CSV.
     """
-    writer = csv.DictWriter(out_f, tuple(sorted(fields.keys())))
+    writer = csv.DictWriter(out_f, tuple(sorted(field_names)))
     writer.writeheader()
     writer.writerows(
         (
@@ -88,20 +88,20 @@ def cli(ctx, f):
 @click.pass_context
 def datasets(ctx, index, expression):
     ctx.obj['write_results'](
-        index.datasets.get_fields(),
-        index.datasets.search_summaries(*parse_expressions(index.datasets.get_field, *expression))
+        index.datasets.get_field_names(),
+        index.datasets.search_summaries(**parse_expressions(*expression))
     )
 
 
-@cli.command(help='Storage units')
+@cli.command('product-counts', help='Counts')
+@click.argument('period', nargs=1)
 @click.argument('expression', nargs=-1)
 @PASS_INDEX
-@click.pass_context
-def units(ctx, index, expression):
-    ctx.obj['write_results'](
-        index.storage.get_fields(),
-        index.storage.search_summaries(*parse_expressions(index.storage.get_field_with_fallback, *expression))
-    )
+def product_counts(index, period, expression):
+    for product, series in index.datasets.count_by_product_through_time(period, **parse_expressions(*expression)):
+        click.echo(product.name)
+        for timerange, count in series:
+            click.echo('    {}: {}'.format(timerange[0].strftime("%Y-%m-%d"), count))
 
 
 @singledispatch

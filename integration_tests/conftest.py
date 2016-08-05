@@ -7,21 +7,22 @@ from __future__ import absolute_import
 import itertools
 import os
 import shutil
-from pathlib import Path
 
 import pytest
 import rasterio
 import yaml
+from pathlib import Path
+
+import datacube.utils
 
 try:
     from yaml import CSafeLoader as SafeLoader
 except ImportError:
     from yaml import SafeLoader
 
-from datacube import ui
 from datacube.api import API
 from datacube.config import LocalConfig
-from datacube.index._api import Index, _DEFAULT_COLLECTIONS_PATH, _DEFAULT_METADATA_TYPES_PATH
+from datacube.index._api import Index, _DEFAULT_METADATA_TYPES_PATH
 from datacube.index.postgres import PostgresDb
 from datacube.index.postgres.tables._core import ensure_db, drop_db, METADATA
 
@@ -33,16 +34,13 @@ eotiles: {eotiles_tile_folder}
 
 INTEGRATION_DEFAULT_CONFIG_PATH = Path(__file__).parent.joinpath('agdcintegration.conf')
 
-_TELEMETRY_COLLECTION_DEF_PATH = Path(__file__).parent.joinpath('telemetry-collection.yaml')
-_ANCILLARY_COLLECTION_DEF_PATH = Path(__file__).parent.joinpath('ancillary-collection.yaml')
-
-_EXAMPLE_LS5_NBAR = Path(__file__).parent.joinpath('example-ls5-nbar.yaml')
-_TELEMETRY_COLLECTION_DESCRIPTOR = Path(__file__).parent.joinpath('telemetry-collection.yaml')
 _EXAMPLE_LS5_NBAR_DATASET_FILE = Path(__file__).parent.joinpath('example-ls5-nbar.yaml')
 
 PROJECT_ROOT = Path(__file__).parents[1]
 CONFIG_SAMPLES = PROJECT_ROOT / 'docs' / 'config_samples'
-LS5_SAMPLES = CONFIG_SAMPLES / 'ga_landsat_5'
+DATASET_TYPES = CONFIG_SAMPLES / 'dataset_types'
+LS5_SAMPLES = CONFIG_SAMPLES / 'storage_types' / 'ga_landsat_5'
+LS5_NBAR_INGEST_CONFIG = CONFIG_SAMPLES / 'ingester' / 'ls5_nbar_albers.yaml'
 LS5_NBAR_STORAGE_TYPE = LS5_SAMPLES / 'ls5_geographic.yaml'
 LS5_NBAR_NAME = 'ls5_nbar'
 LS5_NBAR_ALBERS_STORAGE_TYPE = LS5_SAMPLES / 'ls5_albers.yaml'
@@ -89,7 +87,7 @@ def local_config(integration_config_paths):
 
 @pytest.fixture
 def db(local_config):
-    db = PostgresDb.from_config(local_config, application_name='test-run')
+    db = PostgresDb.from_config(local_config, application_name='test-run', validate_connection=False)
     # Drop and recreate tables so our tests have a clean db.
     drop_db(db._connection)
     remove_dynamic_indexes()
@@ -107,11 +105,11 @@ def remove_dynamic_indexes():
 
 
 @pytest.fixture
-def index(db, local_config):
+def index(db):
     """
     :type db: datacube.index.postgres._api.PostgresDb
     """
-    return Index(db, local_config)
+    return Index(db)
 
 
 @pytest.fixture
@@ -120,6 +118,30 @@ def dict_api(index):
     :type index: datacube.index._api.Index
     """
     return API(index=index)
+
+
+@pytest.fixture
+def ls5_nbar_gtiff_doc(default_metadata_type):
+    return {
+        "name": "ls5_nbart_p54_gtiff",
+        "description": 'LS5 Test',
+        "metadata": {
+            "platform": {
+                "code": "LANDSAT_5"
+            },
+            "product_type": "nbart",
+            "ga_level": "P54",
+            "format": {
+                "name": "GeoTIFF"
+            }
+        },
+        "metadata_type": default_metadata_type.name  # "eo"
+    }
+
+
+@pytest.fixture
+def ls5_nbar_gtiff_type(index, ls5_nbar_gtiff_doc):
+    return index.datasets.types.add_document(ls5_nbar_gtiff_doc)
 
 
 @pytest.fixture
@@ -139,6 +161,26 @@ def example_ls5_dataset(tmpdir):
     return Path(str(dataset_dir))
 
 
+@pytest.fixture
+def ls5_nbar_ingest_config(tmpdir):
+    dataset_dir = tmpdir.mkdir('ls5_nbar_ingest_test')
+    config = load_yaml_file(LS5_NBAR_INGEST_CONFIG)[0]
+
+    config = alter_dataset_type_for_testing(config)
+    config['ingest_bounds'] = {
+        'left': 1400000,
+        'bottom': -4000000,
+        'right': 1600000,
+        'top': -3800000,
+    }
+    config['location'] = str(dataset_dir)
+
+    config_path = dataset_dir.join('ls5_nbar_ingest_config.yaml')
+    with open(str(config_path), 'w') as stream:
+        yaml.dump(config, stream)
+    return config_path, config
+
+
 def create_empty_geotiff(path):
     metadata = {'count': 1,
                 'crs': 'EPSG:28355',
@@ -153,69 +195,30 @@ def create_empty_geotiff(path):
 
 
 @pytest.fixture
-def default_collection_doc():
-    return list(ui.read_documents(_DEFAULT_COLLECTIONS_PATH))[0][1]
+def default_metadata_type_docs():
+    return [doc for (path, doc) in datacube.utils.read_documents(_DEFAULT_METADATA_TYPES_PATH)]
 
 
 @pytest.fixture
-def default_metadata_type_doc():
-    return list(ui.read_documents(_DEFAULT_METADATA_TYPES_PATH))[0][1]
+def default_metadata_type(index, default_metadata_type_docs):
+    for d in default_metadata_type_docs:
+        index.metadata_types.add(d)
+    return index.metadata_types.get_by_name('eo')
 
 
 @pytest.fixture
-def default_metadata_type(index, default_metadata_type_doc):
-    return index.metadata_types.add(default_metadata_type_doc)
-
-
-@pytest.fixture
-def default_collection(index, default_collection_doc, default_metadata_type):
-    """
-    :type index: datacube.index._api.Index
-    """
-    return index.collections.add(default_collection_doc)
-
-
-@pytest.fixture
-def telemetry_collection_doc():
-    return list(ui.read_documents(_TELEMETRY_COLLECTION_DEF_PATH))[0][1]
-
-
-@pytest.fixture
-def ancillary_collection_docs():
-    return [doc for (path, doc) in ui.read_documents(_ANCILLARY_COLLECTION_DEF_PATH)]
-
-
-@pytest.fixture
-def telemetry_collection(index, default_metadata_type, telemetry_collection_doc):
-    """
-    :type index: datacube.index._api.Index
-    :type telemetry_collection_doc: dict
-    """
-    return index.collections.add(telemetry_collection_doc)
-
-
-@pytest.fixture
-def ancillary_collection(index, ancillary_collection_docs):
-    """
-    :type index: datacube.index._api.Index
-    :type ancillary_collection_docs: list[dict]
-    """
-    return index.collections.add(ancillary_collection_docs[0])
-
-
-@pytest.fixture
-def indexed_ls5_nbar_storage_type(db, index):
+def indexed_ls5_scene_dataset_type(index, default_metadata_type):
     """
     :type db: datacube.index.postgres._api.PostgresDb
     :type index: datacube.index._api.Index
     :rtype: datacube.model.StorageType
     """
-    storage_types = load_test_storage_config(LS5_NBAR_STORAGE_TYPE)
+    dataset_types = load_test_dataset_types(DATASET_TYPES / 'ls5_scenes.yaml')
 
-    for storage_type in storage_types:
-        index.storage.types.add(storage_type)
+    for dataset_type in dataset_types:
+        index.datasets.types.add_document(dataset_type)
 
-    return index.storage.types.get_by_name(LS5_NBAR_NAME)
+    return None
 
 
 @pytest.fixture
@@ -223,19 +226,9 @@ def example_ls5_nbar_metadata_doc():
     return load_yaml_file(_EXAMPLE_LS5_NBAR_DATASET_FILE)[0]
 
 
-@pytest.fixture
-def indexed_ls5_nbar_albers_storage_type(db, index):
-    storage_types = load_test_storage_config(LS5_NBAR_ALBERS_STORAGE_TYPE)
-
-    for storage_type in storage_types:
-        index.storage.types.add(storage_type)
-
-    return index.storage.types.get_by_name(LS5_NBAR_ALBERS_NAME)
-
-
-def load_test_storage_config(filename):
-    storage_types = load_yaml_file(filename)
-    return [alter_storage_type_for_testing(storage_type) for storage_type in storage_types]
+def load_test_dataset_types(filename):
+    types = load_yaml_file(filename)
+    return [alter_dataset_type_for_testing(type_) for type_ in types]
 
 
 def load_yaml_file(filename):
@@ -243,24 +236,22 @@ def load_yaml_file(filename):
         return list(yaml.load_all(f, Loader=SafeLoader))
 
 
-def alter_storage_type_for_testing(storage_type):
-    storage_type = limit_num_measurements(storage_type)
-    storage_type = use_test_storage(storage_type)
-    if is_geogaphic(storage_type):
-        return shrink_storage_type(storage_type, GEOGRAPHIC_VARS)
-    else:
-        return shrink_storage_type(storage_type, PROJECTED_VARS)
+def alter_dataset_type_for_testing(type_):
+    if 'measurements' in type_:
+        type_ = limit_num_measurements(type_)
+    if 'storage' in type_:
+        if is_geogaphic(type_):
+            type_ = shrink_storage_type(type_, GEOGRAPHIC_VARS)
+        else:
+            type_ = shrink_storage_type(type_, PROJECTED_VARS)
+    return type_
 
 
 def limit_num_measurements(storage_type):
     measurements = storage_type['measurements']
-    if len(measurements) <= TEST_STORAGE_NUM_MEASUREMENTS:
-        return storage_type
-    else:
-        measurements_to_delete = sorted(measurements)[TEST_STORAGE_NUM_MEASUREMENTS:]
-        for key in measurements_to_delete:
-            del measurements[key]
-        return storage_type
+    if len(measurements) > TEST_STORAGE_NUM_MEASUREMENTS:
+        storage_type['measurements'] = measurements[:TEST_STORAGE_NUM_MEASUREMENTS]
+    return storage_type
 
 
 def use_test_storage(storage_type):

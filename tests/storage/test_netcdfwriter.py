@@ -6,15 +6,15 @@ import netCDF4
 import numpy
 from osgeo import osr
 
-from datacube.model import Variable, Coordinate
+from datacube.model import Variable, CRS
 from datacube.storage.netcdf_writer import create_netcdf, create_coordinate, create_variable, netcdfy_data, \
     create_grid_mapping_variable, flag_mask_meanings
 
-GEO_PROJ = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],' \
-           'AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],' \
-           'AUTHORITY["EPSG","4326"]]'
+GEO_PROJ = CRS('GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],'
+               'AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],'
+               'AUTHORITY["EPSG","4326"]]')
 
-ALBERS_PROJ = """PROJCS["GDA94 / Australian Albers",
+ALBERS_PROJ = CRS("""PROJCS["GDA94 / Australian Albers",
                         GEOGCS["GDA94",
                             DATUM["Geocentric_Datum_of_Australia_1994",
                                 SPHEROID["GRS 1980",6378137,298.257222101,
@@ -37,9 +37,9 @@ ALBERS_PROJ = """PROJCS["GDA94 / Australian Albers",
                         PARAMETER["false_northing",0],
                         AUTHORITY["EPSG","3577"],
                         AXIS["Easting",EAST],
-                        AXIS["Northing",NORTH]]"""
+                        AXIS["Northing",NORTH]]""")
 
-SINIS_PROJ = """PROJCS["Sinusoidal",
+SINIS_PROJ = CRS("""PROJCS["Sinusoidal",
                         GEOGCS["GCS_Undefined",
                                 DATUM["Undefined",
                                 SPHEROID["User_Defined_Spheroid",6371007.181,0.0]],
@@ -49,7 +49,7 @@ SINIS_PROJ = """PROJCS["Sinusoidal",
                         PARAMETER["False_Easting",0.0],
                         PARAMETER["False_Northing",0.0],
                         PARAMETER["Central_Meridian",0.0],
-                        UNIT["Meter",1.0]]"""
+                        UNIT["Meter",1.0]]""")
 
 GLOBAL_ATTRS = {'test_attribute': 'test_value'}
 
@@ -68,10 +68,32 @@ def _ensure_spheroid(var):
     assert 'inverse_flattening' in var.ncattrs()
 
 
+def _ensure_gdal(var):
+    assert 'GeoTransform' in var.ncattrs()
+    assert 'spatial_ref' in var.ncattrs()
+
+
+def _ensure_geospatial(nco):
+    assert 'geospatial_bounds' in nco.ncattrs()
+    assert 'geospatial_bounds_crs' in nco.ncattrs()
+    assert nco.getncattr('geospatial_bounds_crs') == "EPSG:4326"
+
+    assert 'geospatial_lat_min' in nco.ncattrs()
+    assert 'geospatial_lat_max' in nco.ncattrs()
+    assert 'geospatial_lat_units' in nco.ncattrs()
+    assert nco.getncattr('geospatial_lat_units') == "degrees_north"
+
+    assert 'geospatial_lon_min' in nco.ncattrs()
+    assert 'geospatial_lon_max' in nco.ncattrs()
+    assert 'geospatial_lon_units' in nco.ncattrs()
+    assert nco.getncattr('geospatial_lon_units') == "degrees_east"
+
+
 def test_create_albers_projection_netcdf(tmpnetcdf_filename):
     nco = create_netcdf(tmpnetcdf_filename)
-    crs = osr.SpatialReference(ALBERS_PROJ)
-    create_grid_mapping_variable(nco, crs)
+    create_coordinate(nco, 'x', numpy.array([1., 2., 3.]), 'm')
+    create_coordinate(nco, 'y', numpy.array([1., 2., 3.]), 'm')
+    create_grid_mapping_variable(nco, ALBERS_PROJ)
     nco.close()
 
     with netCDF4.Dataset(tmpnetcdf_filename) as nco:
@@ -81,24 +103,29 @@ def test_create_albers_projection_netcdf(tmpnetcdf_filename):
         assert 'longitude_of_central_meridian' in nco['crs'].ncattrs()
         assert 'latitude_of_projection_origin' in nco['crs'].ncattrs()
         _ensure_spheroid(nco['crs'])
+        _ensure_gdal(nco['crs'])
+        _ensure_geospatial(nco)
 
 
 def test_create_epsg4326_netcdf(tmpnetcdf_filename):
     nco = create_netcdf(tmpnetcdf_filename)
-    crs = osr.SpatialReference(GEO_PROJ)
-    create_grid_mapping_variable(nco, crs)
+    create_coordinate(nco, 'latitude', numpy.array([1., 2., 3.]), 'm')
+    create_coordinate(nco, 'longitude', numpy.array([1., 2., 3.]), 'm')
+    create_grid_mapping_variable(nco, GEO_PROJ)
     nco.close()
 
     with netCDF4.Dataset(tmpnetcdf_filename) as nco:
         assert 'crs' in nco.variables
         assert nco['crs'].grid_mapping_name == 'latitude_longitude'
         _ensure_spheroid(nco['crs'])
+        _ensure_geospatial(nco)
 
 
 def test_create_sinus_netcdf(tmpnetcdf_filename):
     nco = create_netcdf(tmpnetcdf_filename)
-    crs = osr.SpatialReference(SINIS_PROJ)
-    create_grid_mapping_variable(nco, crs)
+    create_coordinate(nco, 'x', numpy.array([1., 2., 3.]), 'm')
+    create_coordinate(nco, 'y', numpy.array([1., 2., 3.]), 'm')
+    create_grid_mapping_variable(nco, SINIS_PROJ)
     nco.close()
 
     with netCDF4.Dataset(tmpnetcdf_filename) as nco:
@@ -106,13 +133,12 @@ def test_create_sinus_netcdf(tmpnetcdf_filename):
         assert nco['crs'].grid_mapping_name == 'sinusoidal'
         assert 'longitude_of_central_meridian' in nco['crs'].ncattrs()
         _ensure_spheroid(nco['crs'])
+        _ensure_geospatial(nco)
 
 
 def test_create_string_variable(tmpnetcdf_filename):
     nco = create_netcdf(tmpnetcdf_filename)
-    coord = create_coordinate(nco, 'greg', Coordinate(numpy.dtype('int'), begin=0, end=0,
-                                                      length=3, units='cubic gregs'))
-    coord[:] = [1, 3, 9]
+    coord = create_coordinate(nco, 'greg', numpy.array([1.0, 3.0, 9.0]), 'cubic gregs')
 
     dtype = numpy.dtype('S100')
     data = numpy.array(["test-str1", "test-str2", "test-str3"], dtype=dtype)
@@ -128,12 +154,12 @@ def test_create_string_variable(tmpnetcdf_filename):
 
 def test_chunksizes(tmpnetcdf_filename):
     nco = create_netcdf(tmpnetcdf_filename)
-    coord1 = create_coordinate(nco, 'greg', Coordinate(numpy.dtype('int'), 0, 0, 3, 'cubic gregs'))
-    coord2 = create_coordinate(nco, 'bleh', Coordinate(numpy.dtype('int'), 0, 0, 5, 'metric blehs'))
+    coord1 = create_coordinate(nco, 'greg', numpy.array([1.0, 2.0, 3.0]), 'cubic gregs')
+    coord2 = create_coordinate(nco, 'bleh', numpy.array([1.0, 2.0, 3.0, 4.0, 5.0]), 'metric blehs')
 
-    no_chunks = create_variable(nco, 'no_chunks', Variable(numpy.dtype(int), None, ('greg', 'bleh'), None))
-    min_max_chunks = create_variable(nco, 'min_max_chunks', Variable(numpy.dtype(int), None, ('greg', 'bleh'), None),
-                                     chunksizes=[2, 50])
+    no_chunks = create_variable(nco, 'no_chunks', Variable(numpy.dtype('int16'), None, ('greg', 'bleh'), None))
+    min_max_chunks = create_variable(nco, 'min_max_chunks', Variable(numpy.dtype('int16'), None,
+                                                                     ('greg', 'bleh'), None), chunksizes=[2, 50])
     nco.close()
 
     with netCDF4.Dataset(tmpnetcdf_filename) as nco:

@@ -11,7 +11,9 @@ from datetime import datetime
 import netCDF4
 import numpy
 
-from datacube.api.masking import describe_flags_def
+from datacube.storage.masking import describe_flags_def
+from datacube.model import GeoPolygon, CRS
+from datacube.utils import data_resolution_and_offset
 
 # pylint: disable=ungrouped-imports,wrong-import-order
 try:
@@ -53,8 +55,8 @@ _STANDARD_COORDINATES = {
 }
 
 
-def create_netcdf(netcdf_path):
-    nco = Dataset(netcdf_path, 'w')
+def create_netcdf(netcdf_path, **kwargs):
+    nco = Dataset(netcdf_path, 'w', **kwargs)
     nco.date_created = datetime.today().isoformat()
     nco.setncattr('Conventions', 'CF-1.6, ACDD-1.3')
     nco.history = ("NetCDF-CF file created by "
@@ -63,22 +65,32 @@ def create_netcdf(netcdf_path):
     return nco
 
 
-def create_coordinate(nco, name, coord):
+def append_netcdf(netcdf_path):
+    return Dataset(netcdf_path, 'a')
+
+
+def create_coordinate(nco, name, labels, units):
     """
     :type nco: netCDF4.Dataset
     :type name: str
-    :type coord: datacube.model.Coordinate
-    :return:
+    :type labels: numpy.array
+    :type units: str
+    :return: netCDF4.Variable
     """
-    nco.createDimension(name, coord.length)
-    var = nco.createVariable(name, coord.dtype, name)
-    var.units = coord.units
+    labels = netcdfy_coord(labels)
+
+    nco.createDimension(name, labels.size)
+    var = nco.createVariable(name, labels.dtype, name)
+    var[:] = labels
+
+    var.units = units
     for key, value in _STANDARD_COORDINATES.get(name, {}).items():
         setattr(var, key, value)
+
     return var
 
 
-def create_variable(nco, name, var, **kwargs):
+def create_variable(nco, name, var, set_crs=False, attrs=None, **kwargs):
     """
     :param nco:
     :param name:
@@ -87,25 +99,27 @@ def create_variable(nco, name, var, **kwargs):
     :return:
     """
     if 'chunksizes' in kwargs:
-        maxsizes = [len(nco.dimensions[dim]) for dim in var.dimensions]
+        maxsizes = [len(nco.dimensions[dim]) for dim in var.dims]
         kwargs['chunksizes'] = [min(chunksize, maxsize) if chunksize and maxsize else chunksize
                                 for maxsize, chunksize in zip(maxsizes, kwargs['chunksizes'])]
 
+    assert var.dtype.kind != 'U'  # Creates Non CF-Compliant NetCDF File
     if var.dtype.kind == 'S' and var.dtype.itemsize > 1:
         nco.createDimension(name + '_nchar', size=var.dtype.itemsize)
         data_var = nco.createVariable(varname=name,
                                       datatype='S1',
-                                      dimensions=tuple(var.dimensions) + (name + '_nchar',),
-                                      fill_value=var.nodata,
+                                      dimensions=tuple(var.dims) + (name + '_nchar',),
+                                      fill_value=getattr(var, 'nodata', None),
                                       **kwargs)
     else:
         data_var = nco.createVariable(varname=name,
                                       datatype=var.dtype,
-                                      dimensions=var.dimensions,
-                                      fill_value=var.nodata,
+                                      dimensions=var.dims,
+                                      fill_value=getattr(var, 'nodata', None),
                                       **kwargs)
+    if set_crs:
         data_var.grid_mapping = 'crs'
-    if var.units is not None:
+    if getattr(var, 'units', None):
         data_var.units = var.units
     data_var.set_auto_maskandscale(False)
     return data_var
@@ -113,7 +127,7 @@ def create_variable(nco, name, var, **kwargs):
 
 def _create_latlon_grid_mapping_variable(nco, crs):
     crs_var = nco.createVariable('crs', 'i4')
-    crs_var.long_name = crs.GetAttrValue('GEOGCS')  # "Lon/Lat Coords in WGS84"
+    crs_var.long_name = crs['GEOGCS']  # "Lon/Lat Coords in WGS84"
     crs_var.grid_mapping_name = 'latitude_longitude'
     crs_var.longitude_of_prime_meridian = 0.0
     return crs_var
@@ -123,15 +137,15 @@ def _write_albers_params(crs_var, crs):
     # http://spatialreference.org/ref/epsg/gda94-australian-albers/html/
     # http://cfconventions.org/Data/cf-conventions/cf-conventions-1.7/build/cf-conventions.html#appendix-grid-mappings
     crs_var.grid_mapping_name = 'albers_conical_equal_area'
-    crs_var.standard_parallel = (crs.GetProjParm('standard_parallel_1'),
-                                 crs.GetProjParm('standard_parallel_2'))
-    crs_var.longitude_of_central_meridian = crs.GetProjParm('longitude_of_center')
-    crs_var.latitude_of_projection_origin = crs.GetProjParm('latitude_of_center')
+    crs_var.standard_parallel = (crs.proj.standard_parallel_1,
+                                 crs.proj.standard_parallel_2)
+    crs_var.longitude_of_central_meridian = crs.proj.longitude_of_center
+    crs_var.latitude_of_projection_origin = crs.proj.latitude_of_center
 
 
 def _write_sinusoidal_params(crs_var, crs):
     crs_var.grid_mapping_name = 'sinusoidal'
-    crs_var.longitude_of_central_meridian = crs.GetProjParm('central_meridian')
+    crs_var.longitude_of_central_meridian = crs.proj.central_meridian
 
 
 CRS_PARAM_WRITERS = {
@@ -141,28 +155,23 @@ CRS_PARAM_WRITERS = {
 
 
 def _create_projected_grid_mapping_variable(nco, crs):
-    grid_mapping_name = crs.GetAttrValue('PROJECTION').lower()
+    grid_mapping_name = crs['PROJECTION'].lower()
     if grid_mapping_name not in CRS_PARAM_WRITERS:
         raise ValueError('{} CRS is not supported'.format(grid_mapping_name))
 
     crs_var = nco.createVariable('crs', 'i4')
     CRS_PARAM_WRITERS[grid_mapping_name](crs_var, crs)
 
-    crs_var.false_easting = crs.GetProjParm('false_easting')
-    crs_var.false_northing = crs.GetProjParm('false_northing')
-    crs_var.long_name = crs.GetAttrValue('PROJCS')
+    crs_var.false_easting = crs.proj.false_easting
+    crs_var.false_northing = crs.proj.false_northing
+    crs_var.long_name = crs['PROJCS']
 
     return crs_var
 
 
-def write_gdal_attributes(nco, crs, affine):
-    crs_var = nco['crs']
-    crs_var.spatial_ref = crs.ExportToWkt()
-    crs_var.GeoTransform = affine.to_gdal()
-
-
-def write_geographical_extents_attributes(nco, geo_extents):
-    geo_extents = geo_extents + [geo_extents[0]]
+def _write_geographical_extents_attributes(nco, extent):
+    geo_extents = extent.to_crs(CRS("EPSG:4326")).points
+    geo_extents.append(geo_extents[0])
     nco.geospatial_bounds = "POLYGON((" + ", ".join("{0} {1}".format(*p) for p in geo_extents) + "))"
     nco.geospatial_bounds_crs = "EPSG:4326"
 
@@ -179,16 +188,30 @@ def write_geographical_extents_attributes(nco, geo_extents):
 
 
 def create_grid_mapping_variable(nco, crs):
-    if crs.IsGeographic():
+    if crs.geographic:
         crs_var = _create_latlon_grid_mapping_variable(nco, crs)
-    elif crs.IsProjected():
+    elif crs.projected:
         crs_var = _create_projected_grid_mapping_variable(nco, crs)
     else:
         raise ValueError('Unknown CRS')
-    crs_var.semi_major_axis = crs.GetSemiMajor()
-    crs_var.semi_minor_axis = crs.GetSemiMinor()
-    crs_var.inverse_flattening = crs.GetInvFlattening()
-    crs_var.crs_wkt = crs.ExportToWkt()
+    crs_var.semi_major_axis = crs.semi_major_axis
+    crs_var.semi_minor_axis = crs.semi_minor_axis
+    crs_var.inverse_flattening = crs.inverse_flattening
+    crs_var.crs_wkt = crs.wkt
+
+    crs_var.spatial_ref = crs.wkt
+
+    dims = crs.dimensions
+    xres, xoff = data_resolution_and_offset(nco[dims[1]])
+    yres, yoff = data_resolution_and_offset(nco[dims[0]])
+    crs_var.GeoTransform = [xoff, xres, 0.0, yoff, 0.0, yres]
+
+    left, right = nco[dims[1]][0]-0.5*xres, nco[dims[1]][-1]+0.5*xres
+    bottom, top = nco[dims[0]][0]-0.5*yres, nco[dims[0]][-1]+0.5*yres
+    points = [[left, bottom], [left, top], [right, top], [right, bottom]]
+    _write_geographical_extents_attributes(nco, GeoPolygon(points, crs))
+
+    return crs_var
 
 
 def write_flag_definition(variable, flags_definition):
@@ -196,6 +219,12 @@ def write_flag_definition(variable, flags_definition):
     # Functions for this are stored in Measurements
     variable.QA_index = describe_flags_def(flags_def=flags_definition)
     variable.flag_masks, variable.valid_range, variable.flag_meanings = flag_mask_meanings(flags_def=flags_definition)
+
+
+def netcdfy_coord(data):
+    if data.dtype.kind == 'M':
+        return data.astype('<M8[s]').astype('double')
+    return data
 
 
 def netcdfy_data(data):

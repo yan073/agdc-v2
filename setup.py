@@ -1,18 +1,21 @@
 #!/usr/bin/env python
 
 from setuptools import setup, find_packages
-from datacube.version import get_version
+import versioneer
 
+
+long_description = """Data Cube provides an integrated gridded data analysis environment
+for earth observation satellite and related data from multiple satellite and other acquisition systems"""
 
 setup(name='datacube',
-      version=get_version(),
+      version=versioneer.get_version(),
+      cmdclass=versioneer.get_cmdclass(),
       packages=find_packages(
           exclude=('tests', 'tests.*', 'examples',
                    'integration_tests', 'integration_tests.*')
       ),
       package_data={
-          'gdf_tests': ['gdf_default.conf'],
-          '': ['*.yaml'],
+          '': ['*.yaml', '*/*.yaml'],
       },
       scripts=[
       ],
@@ -28,7 +31,7 @@ setup(name='datacube',
           'jsonschema',
           'cachetools',
           'numpy',
-          'rasterio>=0.28',
+          'rasterio>=0.34',
           'singledispatch',
           'netcdf4',
           'pypeg2',
@@ -54,13 +57,12 @@ setup(name='datacube',
       maintainer='AGDC Collaboration',
       maintainer_email='',
       description='AGDC v2',
-      long_description=open('README.md', 'r').read(),
+      long_description=long_description,
       license='Apache License 2.0',
       entry_points={
           'console_scripts': [
-              'datacube-ingest = datacube.scripts.run_ingest:cli',
-              'datacube-config = datacube.scripts.config_tool:cli',
-              'datacube-search = datacube.scripts.search_tool:cli'
+              'datacube-search = datacube.scripts.search_tool:cli',
+              'datacube = datacube.scripts.cli_app:cli'
           ]
       },
       )

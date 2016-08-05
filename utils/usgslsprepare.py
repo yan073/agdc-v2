@@ -16,7 +16,13 @@ import rasterio.warp
 import click
 from osgeo import osr
 import os
-
+# image boundary imports
+import rasterio
+from rasterio.errors import RasterioIOError
+import rasterio.features
+import shapely.affinity
+import shapely.geometry
+import shapely.ops
 
 _STATIONS = {'023': 'TKSC', '022': 'SGS', '010': 'GNC', '011': 'HOA',
              '012': 'HEOC', '013': 'IKR', '014': 'KIS', '015': 'LGS',
@@ -25,6 +31,68 @@ _STATIONS = {'023': 'TKSC', '022': 'SGS', '010': 'GNC', '011': 'HOA',
              '007': 'DKI', '006': 'CUB', '005': 'CHM', '004': 'BKT', '009': 'GLC',
              '008': 'EDC', '029': 'JSA', '028': 'COA', '021': 'PFS', '020': 'PAC'}
 
+###IMAGE BOUNDARY CODE
+
+def safe_valid_region(images, mask_value=None):
+    try:
+        return valid_region(images, mask_value)
+    except (OSError, RasterioIOError):
+        return None
+
+
+def valid_region(images, mask_value=None):
+    mask = None
+
+    for fname in images:
+        ## ensure formats match
+        with rasterio.open(str(fname), 'r') as ds:
+            transform = ds.affine
+            img = ds.read(1)
+
+            if mask_value is not None:
+                new_mask = img & mask_value == mask_value
+            else:
+                new_mask = img != ds.nodata
+            if mask is None:
+                mask = new_mask
+            else:
+                mask |= new_mask
+
+    shapes = rasterio.features.shapes(mask.astype('uint8'), mask=mask)
+    shape = shapely.ops.unary_union([shapely.geometry.shape(shape) for shape, val in shapes if val == 1])
+
+    # convex hull
+    geom = shape.convex_hull
+
+    # buffer by 1 pixel
+    geom = geom.buffer(1, join_style=3, cap_style=3)
+
+    # simplify with 1 pixel radius
+    geom = geom.simplify(1)
+
+    # intersect with image bounding box
+    geom = geom.intersection(shapely.geometry.box(0, 0, mask.shape[1], mask.shape[0]))
+
+    # transform from pixel space into CRS space
+    geom = shapely.affinity.affine_transform(geom, (transform.a, transform.b, transform.d,
+                                                    transform.e, transform.xoff, transform.yoff))
+    
+    output = shapely.geometry.mapping(geom)
+    output['coordinates'] = _to_lists(output['coordinates'])
+    return output
+
+
+def _to_lists(x):
+    """
+    Returns lists of lists when given tuples of tuples
+    """
+    if isinstance(x, tuple):
+        return [_to_lists(el) for el in x]
+
+    return x
+
+
+###END IMAGE BOUNDARY CODE
 
 def band_name(path):
     name = path.stem
@@ -44,13 +112,13 @@ def get_projection(path):
     with rasterio.open(str(path)) as img:
         left, bottom, right, top = img.bounds
         return {
-            'spatial_reference': str(img.crs_wkt),
+            'spatial_reference': str(str(getattr(img, 'crs_wkt', None) or img.crs.wkt)),
             'geo_ref_points': {
                 'ul': {'x': left, 'y': top},
                 'ur': {'x': right, 'y': top},
                 'll': {'x': left, 'y': bottom},
                 'lr': {'x': right, 'y': bottom},
-                }
+            }
         }
 
 
@@ -77,34 +145,40 @@ def crazy_parse(timestr):
             raise
         return parser.parse(timestr[:-2]+'00') + timedelta(minutes=1)
 
-
 def prep_dataset(fields, path):
-
+    images_list = []
     for file in os.listdir(str(path)):
         if file.endswith(".xml") and (not file.endswith('aux.xml')):
             metafile = file
-    # Parse xml ElementTree gives me a headache so using lxml
-    doc = ElementTree.parse(os.path.join(str(path), metafile))
-    #TODO root method doesn't work here - need to include xlmns...
+        if file.endswith(".tif") and ("band" in file) :
 
-    for global_metadata in doc.findall('{http://espa.cr.usgs.gov/v1.2}global_metadata'):
-        satellite = (global_metadata.find('{http://espa.cr.usgs.gov/v1.2}satellite')).text
-        instrument = (global_metadata.find('{http://espa.cr.usgs.gov/v1.2}instrument')).text
-        acquisition_date = str((global_metadata.find('{http://espa.cr.usgs.gov/v1.2}acquisition_date')).text).replace("-","")
-        scene_center_time = (global_metadata.find('{http://espa.cr.usgs.gov/v1.2}scene_center_time')).text[:8]
-        center_dt = crazy_parse(acquisition_date+"T"+scene_center_time)
-        aos = crazy_parse(acquisition_date+"T"+scene_center_time)-timedelta(seconds=(24/2))
-        los = aos + timedelta(seconds=24)
-        lpgs_metadata_file = (global_metadata.find('{http://espa.cr.usgs.gov/v1.2}lpgs_metadata_file')).text
-        groundstation = lpgs_metadata_file[16:19]
-        fields.update({'instrument': instrument, 'satellite': satellite})
+            images_list.append(os.path.join(str(path),file))
+    with open(os.path.join(str(path), metafile)) as f:
+        xmlstring = f.read()
+    xmlstring = re.sub(r'\sxmlns="[^"]+"', '', xmlstring, count=1)
+    doc = ElementTree.fromstring(xmlstring)
+
+
+    satellite = doc.find('.//satellite').text
+    instrument = doc.find('.//instrument').text
+    acquisition_date = doc.find('.//acquisition_date').text.replace("-", "")
+    scene_center_time = doc.find('.//scene_center_time').text[:8]
+    center_dt = crazy_parse(acquisition_date + "T" + scene_center_time)
+    aos = crazy_parse(acquisition_date + "T" + scene_center_time) - timedelta(seconds=(24 / 2))
+    los = aos + timedelta(seconds=24)
+    lpgs_metadata_file = doc.find('.//lpgs_metadata_file').text
+    groundstation = lpgs_metadata_file[16:19]
+    fields.update({'instrument': instrument, 'satellite': satellite})
+
+
 
     start_time = aos
     end_time = los
     images = {band_name(im_path): {
-        'path': str(im_path.relative_to(path))
+        'path': str(im_path.relative_to(path))   
     } for im_path in path.glob('*.tif')}
-
+    projdict = get_projection(path/next(iter(images.values()))['path'])
+    projdict['valid_data'] = safe_valid_region(images_list)
     doc = {
         'id': str(uuid.uuid4()),
         'processing_level': fields["level"],
@@ -126,14 +200,14 @@ def prep_dataset(fields, path):
         },
         'format': {'name': 'GeoTiff'},
         'grid_spatial': {
-            'projection': get_projection(path/next(iter(images.values()))['path'])
+            'projection': projdict   
         },
         'image': {
             'satellite_ref_point_start': {'path': int(fields["path"]), 'row': int(fields["row"])},
             'satellite_ref_point_end': {'path': int(fields["path"]), 'row': int(fields["row"])},
             'bands': images
         },
-        #TODO include 'lineage': {'source_datasets': {'lpgs_metadata_file': lpgs_metadata_file}}
+       
         'lineage': {'source_datasets': {}}
     }
     populate_coord(doc)
@@ -158,10 +232,11 @@ def prepare_datasets(nbar_path):
         ), nbar_path.stem).groupdict()
 
     timedelta(days=int(fields["julianday"]))
-    fields.update({'level': 'sr_refl', 'type': 'LEDAPS', 'creation_dt': ((crazy_parse(fields["productyear"]+'0101T00:00:00'))+timedelta(days=int(fields["julianday"])))})
+    fields.update({'level': 'sr_refl',
+                   'type': 'LEDAPS',
+                   'creation_dt': ((crazy_parse(fields["productyear"]+'0101T00:00:00'))+timedelta(days=int(fields["julianday"])))})
     nbar = prep_dataset(fields, nbar_path)
     return (nbar, nbar_path)
-
 
 @click.command(help="Prepare USGS LS dataset for ingestion into the Data Cube.")
 @click.argument('datasets',

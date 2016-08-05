@@ -1,37 +1,35 @@
 from __future__ import absolute_import
 
-import sys
-import warnings
-from past.builtins import basestring
-from datetime import datetime
-from pathlib import Path
-from subprocess import call, check_output, PIPE, CalledProcessError
+import shutil
+from subprocess import call
 
-import six
-import netCDF4
-import numpy as np
+import numpy
+
 import pytest
-
-import yaml
 from click.testing import CliRunner
+from pathlib import Path
 
-import datacube.scripts.run_ingest
-import datacube.scripts.config_tool
-from .conftest import LS5_NBAR_NAME, LS5_NBAR_ALBERS_NAME, EXAMPLE_LS5_DATASET_ID
+import datacube.scripts.cli_app
+from datacube.compat import string_types
 
+import imp
 
 PROJECT_ROOT = Path(__file__).parents[1]
 CONFIG_SAMPLES = PROJECT_ROOT / 'docs/config_samples/'
-LS5_SAMPLES = CONFIG_SAMPLES / 'ga_landsat_5/'
-LS5_NBAR_ALBERS_STORAGE_TYPE = LS5_SAMPLES / 'ls5_albers.yaml'
+LS5_DATASET_TYPES = CONFIG_SAMPLES / 'dataset_types/ls5_scenes.yaml'
+TEST_DATA = PROJECT_ROOT / 'tests' / 'data' / 'lbg'
 
-UTILS = PROJECT_ROOT / 'utils'
-GA_LS_PREPARE_SCRIPT = UTILS / 'galsprepare.py'
+INGESTER_CONFIGS = CONFIG_SAMPLES / 'ingester'
 
-TEST_DATA = PROJECT_ROOT / 'tests' / 'data'
-LBG_SCENES = TEST_DATA / 'lbg'
-LBG_NBAR = LBG_SCENES / 'LS5_TM_NBAR_P54_GANBAR01-002_090_084_19920323'
-LBG_PQ = LBG_SCENES / 'LS5_TM_PQ_P55_GAPQ01-002_090_084_19920323'
+LS5_NBAR_ALBERS = 'ls5_nbar_albers.yaml'
+LS5_PQ_ALBERS = 'ls5_pq_albers.yaml'
+
+GA_LS_PREPARE_SCRIPT = PROJECT_ROOT / 'utils/galsprepare.py'
+
+galsprepare = imp.load_source('module.name', str(GA_LS_PREPARE_SCRIPT))
+
+LBG_NBAR = 'LS5_TM_NBAR_P54_GANBAR01-002_090_084_19920323'
+LBG_PQ = 'LS5_TM_PQ_P55_GAPQ01-002_090_084_19920323'
 
 ALBERS_ELEMENT_SIZE = 25
 
@@ -40,90 +38,80 @@ LBG_CELL_Y = -40
 LBG_CELL = (LBG_CELL_X, LBG_CELL_Y)
 
 
-@pytest.mark.usefixtures('default_collection')
-def test_end_to_end(global_integration_cli_args, index, example_ls5_dataset):
-    """
-    Loads two storage mapping configurations, then ingests a sample Landsat 5 scene
+@pytest.fixture()
+def testdata_dir(tmpdir):
+    datadir = Path(str(tmpdir), 'data')
+    datadir.mkdir()
 
-    One storage configuration specifies Australian Albers Equal Area Projection,
+    shutil.copytree(str(TEST_DATA), str(tmpdir / 'lbg'))
+
+    copy_and_update_ingestion_configs(tmpdir, tmpdir,
+                                      (INGESTER_CONFIGS / file for file in (LS5_NBAR_ALBERS, LS5_PQ_ALBERS)))
+
+    return tmpdir
+
+
+def copy_and_update_ingestion_configs(destination, output_dir, configs):
+    for ingestion_config in configs:
+        with ingestion_config.open() as input:
+            output_file = destination / ingestion_config.name
+            with output_file.open(mode='w') as output:
+                for line in input:
+                    if 'location: ' in line:
+                        line = 'location: ' + str(output_dir) + '\n'
+                    output.write(line)
+
+
+ignore_me = pytest.mark.xfail(True, reason="get_data/get_description still to be fixed in Unification")
+
+
+@pytest.mark.usefixtures('default_metadata_type')
+def test_end_to_end(global_integration_cli_args, index, testdata_dir):
+    """
+    Loads two dataset configurations, then ingests a sample Landsat 5 scene
+
+    One dataset configuration specifies Australian Albers Equal Area Projection,
     the other is simply latitude/longitude.
 
     The input dataset should be recorded in the index, and two sets of netcdf storage units
     should be created on disk and recorded in the index.
     """
 
-    # Copy scenes to a temp dir?
+    lbg_nbar = testdata_dir / 'lbg' / LBG_NBAR
+    lbg_pq = testdata_dir / 'lbg' / LBG_PQ
+    ls5_nbar_albers_ingest_config = testdata_dir / LS5_NBAR_ALBERS
+    ls5_pq_albers_ingest_config = testdata_dir / LS5_PQ_ALBERS
+
     # Run galsprepare.py on the NBAR and PQ scenes
+    run_click_command(galsprepare.main, [str(lbg_nbar)])
 
-    retcode = call(
-        [
-            'python',
-            str(GA_LS_PREPARE_SCRIPT),
-            str(LBG_NBAR)
-        ],
-        stderr=PIPE
-    )
-    assert retcode == 0
+    # Add the LS5 Dataset Types
+    run_click_command(datacube.scripts.cli_app.cli,
+                      global_integration_cli_args + ['-v', 'product', 'add', str(LS5_DATASET_TYPES)])
 
-    # Add the LS5 Albers Example
-    opts = list(global_integration_cli_args)
-    opts.extend(
-        [
-            '-vv',
-            'storage',
-            'add',
-            str(LS5_NBAR_ALBERS_STORAGE_TYPE)
-        ]
-    )
-    result = CliRunner().invoke(
-        datacube.scripts.config_tool.cli,
-        opts,
-        catch_exceptions=False
-    )
-    print(result.output)
-    assert not result.exception
-    assert result.exit_code == 0
+    # Index the Datasets
+    run_click_command(datacube.scripts.cli_app.cli,
+                      global_integration_cli_args +
+                      ['-v', 'dataset', 'add', '--auto-match',
+                       str(lbg_nbar), str(lbg_pq)])
 
-    # Run Ingest script on a dataset
-    opts = list(global_integration_cli_args)
-    opts.extend(
-        [
-            '-vv',
-            'ingest',
-            str(LBG_NBAR)
-        ]
-    )
-    result = CliRunner().invoke(
-        datacube.scripts.run_ingest.cli,
-        opts,
-        catch_exceptions=False
-    )
-    print(result.output)
-    assert not result.exception
-    assert result.exit_code == 0
+    # Ingest NBAR
+    run_click_command(datacube.scripts.cli_app.cli,
+                      global_integration_cli_args +
+                      ['-v', 'ingest', '-c', str(ls5_nbar_albers_ingest_config)])
 
-    # Run Ingest script on a dataset
-    opts = list(global_integration_cli_args)
-    opts.extend(
-        [
-            '-vv',
-            'ingest',
-            str(LBG_PQ)
-        ]
-    )
-    result = CliRunner().invoke(
-        datacube.scripts.run_ingest.cli,
-        opts,
-        catch_exceptions=False
-    )
-    print(result.output)
-    assert not result.exception
-    assert result.exit_code == 0
+    # Ingest PQ
+    run_click_command(datacube.scripts.cli_app.cli,
+                      global_integration_cli_args +
+                      ['-v', 'ingest', '-c', str(ls5_pq_albers_ingest_config)])
 
     check_open_with_api(index)
+    check_open_with_dc(index)
+    check_open_with_grid_workflow(index)
     check_analytics_list_searchables(index)
     check_get_descriptor(index)
     check_get_data(index)
+    check_get_data_subset(index)
     check_get_descriptor_data(index)
     check_get_descriptor_data_storage_type(index)
     check_analytics_create_array(index)
@@ -132,53 +120,96 @@ def test_end_to_end(global_integration_cli_args, index, example_ls5_dataset):
     check_analytics_pixel_drill(index)
 
 
+def run_click_command(command, args):
+    result = CliRunner().invoke(
+        command,
+        args=args,
+        catch_exceptions=False
+    )
+    print(result.output)
+    assert not result.exception
+    assert result.exit_code == 0
+
+
 def check_open_with_api(index):
-    import datacube.api
-    api = datacube.api.API(index=index)
-    fields = api.list_fields()
-    assert 'product' in fields
+    from datacube.api import API
+    api = API(index=index)
+
+    # fields = api.list_fields()
+    # assert 'product' in fields
+
     descriptor = api.get_descriptor()
     assert 'ls5_nbar_albers' in descriptor
-    storage_units = descriptor['ls5_nbar_albers']['storage_units']
+    groups = descriptor['ls5_nbar_albers']['groups']
     query = {
         'variables': ['blue'],
         'dimensions': {
-            'latitude': {'range': (-34, -35)},
+            'latitude': {'range': (-35, -36)},
             'longitude': {'range': (149, 150)}}
     }
-    data = api.get_data(query, storage_units=storage_units)
+    data = api.get_data(query)  # , dataset_groups=groups)
     assert abs(data['element_sizes'][1] - ALBERS_ELEMENT_SIZE) < .0000001
     assert abs(data['element_sizes'][2] - ALBERS_ELEMENT_SIZE) < .0000001
 
-    data_array = api.get_data_array(storage_type='ls5_nbar_albers', variables=['blue'],
-                                    latitude=(-34, -35), longitude=(149, 150))
-    assert data_array.size
 
-    dataset = api.get_dataset(storage_type='ls5_nbar_albers', variables=['blue'],
-                              latitude=(-34, -35), longitude=(149, 150))
+def check_open_with_dc(index):
+    from datacube.api.core import Datacube
+    dc = Datacube(index=index)
+
+    data_array = dc.load(product='ls5_nbar_albers', measurements=['blue'], stack='variable')
+    assert data_array.shape
+
+    data_array = dc.load(product='ls5_nbar_albers', latitude=(-35, -36), longitude=(149, 150), stack='variable')
+    assert data_array.ndim == 4
+    assert 'variable' in data_array.dims
+
+    dataset = dc.load(product='ls5_nbar_albers', measurements=['blue'])
     assert dataset['blue'].size
 
-    data_array_cell = api.get_data_array_by_cell(LBG_CELL, storage_type='ls5_nbar_albers', variables=['blue'])
-    assert data_array_cell.size
+    dataset = dc.load(product='ls5_nbar_albers', latitude=(-35.2, -35.3), longitude=(149.1, 149.2))
+    assert dataset['blue'].size
 
-    data_array_cell = api.get_data_array_by_cell(x_index=LBG_CELL_X, y_index=LBG_CELL_Y,
-                                                 storage_type='ls5_nbar_albers', variables=['blue'])
-    assert data_array_cell.size
+    data_array = dc.load(product='ls5_nbar_albers',
+                         latitude=(-35, -36), longitude=(149, 150),
+                         measurements=['blue'], group_by='solar_day')
 
-    dataset_cell = api.get_dataset_by_cell(LBG_CELL, storage_type='ls5_nbar_albers', variables=['blue'])
+    products_df = dc.list_products()
+    assert len(products_df)
+    assert len(products_df[products_df['name'].isin(['ls5_nbar_albers'])])
+    assert len(products_df[products_df['name'].isin(['ls5_pq_albers'])])
+
+    assert len(dc.list_measurements())
+
+
+def check_open_with_grid_workflow(index):
+    type_name = 'ls5_nbar_albers'
+    dt = index.datasets.types.get_by_name(type_name)
+
+    from datacube.api.grid_workflow import GridWorkflow
+    gw = GridWorkflow(index, dt.grid_spec)
+
+    cells = gw.list_cells(product=type_name)
+    assert LBG_CELL in cells
+
+    tile = cells[LBG_CELL]
+    dataset_cell = gw.load(tile, measurements=['blue'])
     assert dataset_cell['blue'].size
 
-    dataset_cell = api.get_dataset_by_cell([LBG_CELL], storage_type='ls5_nbar_albers', variables=['blue'])
+    dataset_cell = gw.load(tile)
+    assert all(m in dataset_cell for m in ['blue', 'green', 'red', 'nir', 'swir1', 'swir2'])
+
+    ts = numpy.datetime64('1992-03-23T23:14:25.500000000')
+    tile_key = LBG_CELL + (ts,)
+    tiles = gw.list_tiles(product=type_name)
+    assert tiles
+    assert tile_key in tiles
+
+    tile = tiles[tile_key]
+    dataset_cell = gw.load(tile, measurements=['blue'])
     assert dataset_cell['blue'].size
 
-    dataset_cell = api.get_dataset_by_cell(x_index=LBG_CELL_X, y_index=LBG_CELL_Y, storage_type='ls5_nbar_albers',
-                                           variables=['blue'])
-    assert dataset_cell['blue'].size
-
-    tiles = api.list_tiles(x_index=LBG_CELL_X, y_index=LBG_CELL_Y, storage_type='ls5_nbar_albers')
-    for tile_query, tile_attrs in tiles:
-        dataset = api.get_dataset_by_cell(**tile_query)
-        assert dataset['blue'].size
+    dataset_cell = gw.load(tile)
+    assert all(m in dataset_cell for m in ['blue', 'green', 'red', 'nir', 'swir1', 'swir2'])
 
 
 def check_analytics_list_searchables(index):
@@ -261,15 +292,15 @@ def check_get_descriptor(index):
     assert 'nodata_value' in list(d.values())[0]['variables'][var2].keys()
 
     for su in list(d.values())[0]['storage_units'].values():
-        assert 'irregular_indicies' in su
+        assert 'irregular_indices' in su
         assert 'storage_max' in su
         assert 'storage_min' in su
         assert 'storage_path' in su
         assert 'storage_shape' in su
-        assert isinstance(su['irregular_indicies'], dict)
+        assert isinstance(su['irregular_indices'], dict)
         assert isinstance(su['storage_max'], tuple)
         assert isinstance(su['storage_min'], tuple)
-        assert isinstance(su['storage_path'], basestring)
+        assert isinstance(su['storage_path'], string_types)
         assert isinstance(su['storage_shape'], tuple)
 
 
@@ -333,14 +364,14 @@ def check_get_data(index):
     for crs in d['coordinate_reference_systems']:
         assert 'reference_system_definition' in crs
         assert 'reference_system_unit' in crs
-        assert isinstance(crs['reference_system_definition'], basestring)
-        assert isinstance(crs['reference_system_unit'], basestring)
+        assert isinstance(crs['reference_system_definition'], string_types)
+        assert isinstance(crs['reference_system_unit'], string_types)
 
     for dim in d['indices']:
         assert isinstance(d['indices'][dim], np.ndarray)
 
-    assert isinstance(d['arrays'][var1], xr.DataArray)
-    assert isinstance(d['arrays'][var2], xr.DataArray)
+    assert isinstance(d['arrays'][var1], xr.core.dataarray.DataArray)
+    assert isinstance(d['arrays'][var2], xr.core.dataarray.DataArray)
 
     assert d['arrays'][var1].shape == d['size']
     assert d['arrays'][var2].shape == d['size']
@@ -356,9 +387,43 @@ def check_get_data(index):
         assert dim in list(d['arrays'][var2].dims)
 
 
+def check_get_data_subset(index):
+    from datetime import datetime
+    from datacube.api import API
+
+    g = API(index=index)
+
+    platform = 'LANDSAT_5'
+    product = 'nbar'
+    var1 = 'red'
+    var2 = 'nir'
+
+    data_request_descriptor = {
+        'platform': platform,
+        'product': product,
+        'variables': (var1, var2),
+        'dimensions': {
+            'x': {
+                'range': (149.07, 149.18),
+                'array_range': (5, 10)
+            },
+            'y': {
+                'range': (-35.32, -35.28),
+                'array_range': (5, 10)
+            },
+            'time': {
+                'range': (datetime(1992, 1, 1), datetime(1992, 12, 31))
+            }
+        }
+    }
+
+    d = g.get_data(data_request_descriptor)
+
+    assert d['arrays'][var1].shape == (1, 5, 5)
+    assert d['arrays'][var2].shape == (1, 5, 5)
+
+
 def check_get_descriptor_data(index):
-    import numpy as np
-    import xarray as xr
     from datetime import datetime
     from datacube.api import API
 
@@ -404,8 +469,6 @@ def check_get_descriptor_data(index):
 
 
 def check_get_descriptor_data_storage_type(index):
-    import numpy as np
-    import xarray as xr
     from datetime import datetime
     from datacube.api import API
 

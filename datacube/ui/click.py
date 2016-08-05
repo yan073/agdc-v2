@@ -7,13 +7,18 @@ from __future__ import absolute_import
 import functools
 import logging
 import os
+import re
+import copy
 
 import click
 
 from datacube import config, __version__
 from datacube.executor import get_executor
 from datacube.index import index_connect
+from pathlib import Path
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
+_LOG_FORMAT_STRING = '%(asctime)s %(levelname)s %(message)s'
 CLICK_SETTINGS = dict(help_option_names=['-h', '--help'])
 
 
@@ -45,10 +50,55 @@ def compose(*functions):
     return functools.reduce(compose2, functions, lambda x: x)
 
 
+class ColorFormatter(logging.Formatter):
+    colors = {
+        'info': dict(fg='white'),
+        'error': dict(fg='red'),
+        'exception': dict(fg='red'),
+        'critical': dict(fg='red'),
+        'debug': dict(fg='blue'),
+        'warning': dict(fg='yellow')
+    }
+
+    def format(self, record):
+        if not record.exc_info:
+            record = copy.copy(record)
+            record.levelname = click.style(record.levelname, **self.colors.get(record.levelname.lower(), {}))
+        return logging.Formatter.format(self, record)
+
+
+class ClickHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            click.echo(msg, err=True)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except:  # pylint: disable=bare-except
+            self.handleError(record)
+
+
 def _init_logging(ctx, param, value):
+    handler = ClickHandler()
+    handler.formatter = ColorFormatter(_LOG_FORMAT_STRING)
+    logging.root.addHandler(handler)
+
     logging_level = logging.WARN - 10 * value
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging_level)
+    logging.root.setLevel(logging_level)
     logging.getLogger('datacube').setLevel(logging_level)
+
+    if not ctx.obj:
+        ctx.obj = {}
+
+    ctx.obj['verbosity'] = value
+
+
+def _add_logfile(ctx, param, value):
+    formatter = logging.Formatter(_LOG_FORMAT_STRING)
+    for logfile in value:
+        handler = logging.FileHandler(logfile)
+        handler.formatter = formatter
+        logging.root.addHandler(handler)
 
 
 def _log_queries(ctx, param, value):
@@ -73,20 +123,37 @@ def _set_config(ctx, param, value):
     ctx.obj['config_file'] = parsed_config
 
 
+#: pylint: disable=invalid-name
+version_option = click.option('--version', is_flag=True, callback=_print_version,
+                              expose_value=False, is_eager=True)
+#: pylint: disable=invalid-name
+verbose_option = click.option('--verbose', '-v', count=True, callback=_init_logging,
+                              is_eager=True, expose_value=False, help="Use multiple times for more verbosity")
+#: pylint: disable=invalid-name
+logfile_option = click.option('--log-file', multiple=True, callback=_add_logfile,
+                              is_eager=True, expose_value=False, help="Specify log file")
+#: pylint: disable=invalid-name
+config_option = click.option('--config_file', '-C', multiple=True, default='', callback=_set_config,
+                             expose_value=False)
+#: pylint: disable=invalid-name
+log_queries_option = click.option('--log-queries', is_flag=True, callback=_log_queries,
+                                  expose_value=False, help="Print database queries.")
+
 # This is a function, so it's valid to be lowercase.
 #: pylint: disable=invalid-name
 global_cli_options = compose(
-    click.option('--version', is_flag=True,
-                 callback=_print_version, expose_value=False, is_eager=True),
-    click.option('--verbose', '-v', count=True, callback=_init_logging,
-                 is_eager=True, expose_value=False,
-                 help="Use multiple times for more verbosity"),
-    click.option('--config_file', '-C', multiple=True, default='',
-                 callback=_set_config, expose_value=False),
-    click.option('--log-queries', is_flag=True, callback=_log_queries,
-                 expose_value=False,
-                 help="Print database queries.")
+    version_option,
+    verbose_option,
+    logfile_option,
+    config_option,
+    log_queries_option
 )
+
+
+@click.group(help="Data Cube command-line interface", context_settings=CLICK_SETTINGS)
+@global_cli_options
+def cli():
+    pass
 
 
 def pass_config(f):
@@ -99,7 +166,7 @@ def pass_config(f):
     return functools.update_wrapper(new_func, f)
 
 
-def pass_index(app_name='cli'):
+def pass_index(app_name=None, expect_initialised=True):
     """Get a connection to the index as the first argument.
 
     A short name name of the application can be specified for logging purposes.
@@ -107,11 +174,14 @@ def pass_index(app_name='cli'):
 
     def decorate(f):
         def with_index(*args, **kwargs):
-            index = index_connect(
-                click.get_current_context().obj['config_file'],
-                application_name=app_name
-            )
-            return f(index, *args, **kwargs)
+            ctx = click.get_current_context()
+            try:
+                index = index_connect(ctx.obj['config_file'],
+                                      application_name=app_name or ctx.command_path,
+                                      validate_connection=expect_initialised)
+                return f(index, *args, **kwargs)
+            except (OperationalError, ProgrammingError) as e:
+                handle_exception('Error Connecting to database: %s', e)
 
         return functools.update_wrapper(with_index, f)
 
@@ -144,3 +214,34 @@ executor_cli_options = click.option('--executor',
                                          "--executor multiproc 4 (OR)\n"
                                          "--executor distributed 10.0.0.8:8888",
                                     callback=_setup_executor)
+
+
+def handle_exception(msg, e):
+    """
+    Exit following an exception in a CLI app
+
+    If verbosity (-v flag) specified, dump out a stack trace. Otherwise,
+    simply print the given error message.
+
+    Include a '%s' in the message to print the single line message from the
+    exception.
+
+    :param e: caught Exception
+    :param msg: Message to User with optional %s
+    """
+    ctx = click.get_current_context()
+    if ctx.obj['verbosity'] >= 1:
+        raise e
+    else:
+        if '%s' in msg:
+            click.echo(msg % e)
+        else:
+            click.echo(msg)
+        ctx.exit(1)
+
+
+def to_pathlib(ctx, param, value):
+    if value:
+        return Path(value)
+    else:
+        return None

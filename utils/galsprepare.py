@@ -49,7 +49,7 @@ def get_projection(path):
     with rasterio.open(str(path)) as img:
         left, bottom, right, top = img.bounds
         return {
-            'spatial_reference': str(img.crs_wkt),
+            'spatial_reference': str(getattr(img, 'crs_wkt', None) or img.crs.wkt),
             'geo_ref_points': {
                 'ul': {'x': left, 'y': top},
                 'ur': {'x': right, 'y': top},
@@ -181,6 +181,9 @@ def prepare_datasets(nbar_path, pq_path=None, fc_path=None):
                 nargs=-1)
 def main(datasets):
     logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
+
+    if not datasets:
+        logging.info('Please provide the path to some datasets.')
 
     for dataset in datasets:
         path = Path(dataset)

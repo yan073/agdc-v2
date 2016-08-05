@@ -11,13 +11,17 @@ import pytest
 
 import yaml
 from click.testing import CliRunner
+from affine import Affine
 
-import datacube.scripts.run_ingest
-from .conftest import LS5_NBAR_NAME, LS5_NBAR_ALBERS_NAME, EXAMPLE_LS5_DATASET_ID
+import datacube.scripts.cli_app
+from datacube.model import GeoBox, CRS
+from datacube.utils import read_documents
+from .conftest import EXAMPLE_LS5_DATASET_ID
 
 PROJECT_ROOT = Path(__file__).parents[1]
 CONFIG_SAMPLES = PROJECT_ROOT / 'docs/config_samples/'
 LS5_SAMPLES = CONFIG_SAMPLES / 'ga_landsat_5/'
+LS5_MATCH_RULES = CONFIG_SAMPLES / 'match_rules' / 'ls5_scenes.yaml'
 LS5_NBAR_STORAGE_TYPE = LS5_SAMPLES / 'ls5_geographic.yaml'
 LS5_NBAR_ALBERS_STORAGE_TYPE = LS5_SAMPLES / 'ls5_albers.yaml'
 
@@ -34,31 +38,21 @@ JSON_DATE_FORMAT = '%Y-%m-%dT%H:%M:%S'
 COMPLIANCE_CHECKER_NORMAL_LIMIT = 2
 
 
-@pytest.mark.usefixtures('default_collection',
-                         'indexed_ls5_nbar_storage_type',
-                         'indexed_ls5_nbar_albers_storage_type')
-def test_full_ingestion(global_integration_cli_args, index, example_ls5_dataset):
-    """
-    Loads two storage mapping configurations, then ingests a sample Landsat 5 scene
-
-    One storage configuration specifies Australian Albers Equal Area Projection,
-    the other is simply latitude/longitude.
-
-    The input dataset should be recorded in the index, and two sets of netcdf storage units
-    should be created on disk and recorded in the index.
-    """
-
-    # Run Ingest script on a dataset
+@pytest.mark.usefixtures('default_metadata_type',
+                         'indexed_ls5_scene_dataset_type')
+def test_full_ingestion(global_integration_cli_args, index, example_ls5_dataset, ls5_nbar_ingest_config):
     opts = list(global_integration_cli_args)
     opts.extend(
         [
-            '-vv',
-            'ingest',
+            '-v',
+            'dataset',
+            'add',
+            '--auto-match',
             str(example_ls5_dataset)
         ]
     )
     result = CliRunner().invoke(
-        datacube.scripts.run_ingest.cli,
+        datacube.scripts.cli_app.cli,
         opts,
         catch_exceptions=False
     )
@@ -68,28 +62,46 @@ def test_full_ingestion(global_integration_cli_args, index, example_ls5_dataset)
 
     ensure_dataset_is_indexed(index)
 
-    # Check storage units are indexed and written
-    sus = index.storage.search_eager()
-    latlon_storageunits = [su for su in sus if su.storage_type.name == LS5_NBAR_NAME]
-    assert len(latlon_storageunits) == EXPECTED_NUMBER_OF_STORAGE_UNITS
+    config_path, config = ls5_nbar_ingest_config
 
-    albers_storageunits = [su for su in sus if su.storage_type.name == LS5_NBAR_ALBERS_NAME]
-    assert len(albers_storageunits) == EXPECTED_NUMBER_OF_STORAGE_UNITS
+    opts = list(global_integration_cli_args)
+    opts.extend(
+        [
+            '-v',
+            'ingest',
+            '--config-file',
+            str(config_path)
+        ]
+    )
+    result = CliRunner().invoke(
+        datacube.scripts.cli_app.cli,
+        opts,
+        catch_exceptions=False
+    )
+    print(result.output)
+    assert not result.exception
+    assert result.exit_code == 0
 
-    for su in (latlon_storageunits[0], albers_storageunits[0]):
-        assert su.size_bytes > 0
-        with netCDF4.Dataset(str(su.local_path)) as nco:
-            check_data_shape(nco)
-            check_grid_mapping(nco)
-            check_cf_compliance(nco)
-            check_dataset_metadata_in_storage_unit(nco, example_ls5_dataset)
-            check_global_attributes(nco, su.storage_type.global_attributes)
-        check_open_with_xray(su.local_path)
+    datasets = index.datasets.search_eager(product='ls5_nbar_albers')
+    assert len(datasets) > 0
+    assert datasets[0].managed
+
+    ds_path = str(datasets[0].local_path)
+    with netCDF4.Dataset(ds_path) as nco:
+        check_data_shape(nco)
+        check_grid_mapping(nco)
+        check_cf_compliance(nco)
+        check_dataset_metadata_in_storage_unit(nco, example_ls5_dataset)
+        check_attributes(nco, config['global_attributes'])
+
+        name = config['measurements'][0]['name']
+        check_attributes(nco[name], config['measurements'][0]['attrs'])
+    check_open_with_xarray(ds_path)
     check_open_with_api(index)
 
 
 def ensure_dataset_is_indexed(index):
-    datasets = index.datasets.search_eager()
+    datasets = index.datasets.search_eager(product='ls5_nbar_scene')
     assert len(datasets) == 1
     assert datasets[0].id == EXAMPLE_LS5_DATASET_ID
 
@@ -107,10 +119,6 @@ def check_data_shape(nco):
 
 
 def check_cf_compliance(dataset):
-    if not six.PY2:
-        warnings.warn('compliance_checker non-functional in Python 3. Skipping NetCDF-CF Compliance Checks')
-        return
-
     try:
         from compliance_checker.runner import CheckSuite, ComplianceChecker
     except ImportError:
@@ -125,83 +133,41 @@ def check_cf_compliance(dataset):
     assert cs.passtree(groups, limit=COMPLIANCE_CHECKER_NORMAL_LIMIT)
 
 
-def check_global_attributes(nco, attrs):
+def check_attributes(obj, attrs):
     for k, v in attrs.items():
-        assert nco.getncattr(k) == v
+        assert k in obj.ncattrs()
+        assert obj.getncattr(k) == v
 
 
 def check_dataset_metadata_in_storage_unit(nco, dataset_dir):
-    assert len(nco.variables['extra_metadata']) == 1  # 1 time slice
-    stored_metadata = netCDF4.chartostring(nco.variables['extra_metadata'][0])
-    stored_metadata = str(np.char.decode(stored_metadata))
+    assert len(nco.variables['dataset']) == 1  # 1 time slice
+    stored_metadata = nco.variables['dataset'][0]
+    if not isinstance(stored_metadata, str):
+        stored_metadata = netCDF4.chartostring(stored_metadata)
+        stored_metadata = str(np.char.decode(stored_metadata))
     ds_filename = dataset_dir / 'agdc-metadata.yaml'
-    with ds_filename.open() as f:
-        orig_metadata = f.read()
-    stored = make_pgsqljson_match_yaml_load(yaml.safe_load(stored_metadata))
-    original = make_pgsqljson_match_yaml_load(yaml.safe_load(orig_metadata))
-    assert stored == original
+
+    stored = yaml.safe_load(stored_metadata)
+    [(_, original)] = read_documents(ds_filename)
+    assert len(stored['lineage']['source_datasets']) == 1
+    assert next(iter(stored['lineage']['source_datasets'].values())) == original
 
 
-def check_open_with_xray(file_path):
+def check_open_with_xarray(file_path):
     import xarray
     xarray.open_dataset(str(file_path))
 
 
 def check_open_with_api(index):
-    import datacube.api
-    api = datacube.api.API(index=index)
-    fields = api.list_fields()
-    assert 'product' in fields
-    descriptor = api.get_descriptor()
-    assert 'ls5_nbar' in descriptor
-    storage_units = descriptor['ls5_nbar']['storage_units']
-    query = {
-        'variables': ['blue'],
-        'dimensions': {
-            'latitude': {'range': (-34, -35)},
-            'longitude': {'range': (149, 150)}}
-    }
-    data = api.get_data(query, storage_units=storage_units)
-    assert abs(data['element_sizes'][1] - 0.025) < .0000001
-    assert abs(data['element_sizes'][2] - 0.025) < .0000001
+    from datacube.api.core import Datacube
+    datacube = Datacube(index=index)
 
-    data_array = api.get_data_array(storage_type='ls5_nbar', variables=['blue'],
-                                    latitude=(-34, -35), longitude=(149, 150))
-    assert data_array.size
+    input_type_name = 'ls5_nbar_albers'
+    input_type = datacube.index.datasets.types.get_by_name(input_type_name)
 
-    dataset = api.get_dataset(storage_type='ls5_nbar', variables=['blue'],
-                              latitude=(-34, -35), longitude=(149, 150))
-    assert dataset['blue'].size
-
-    data_array_cell = api.get_data_array_by_cell((149, -34), storage_type='ls5_nbar', variables=['blue'])
-    assert data_array_cell.size
-
-    data_array_cell = api.get_data_array_by_cell(x_index=149, y_index=-34,
-                                                 storage_type='ls5_nbar', variables=['blue'])
-    assert data_array_cell.size
-
-    dataset_cell = api.get_dataset_by_cell((149, -34), storage_type='ls5_nbar', variables=['blue'])
-    assert dataset_cell['blue'].size
-
-    dataset_cell = api.get_dataset_by_cell([(149, -34), (149, -35)], storage_type='ls5_nbar', variables=['blue'])
-    assert dataset_cell['blue'].size
-
-    dataset_cell = api.get_dataset_by_cell(x_index=149, y_index=-34, storage_type='ls5_nbar', variables=['blue'])
-    assert dataset_cell['blue'].size
-
-    tiles = api.list_tiles(x_index=149, y_index=-34, storage_type='ls5_nbar')
-    for tile_query, tile_attrs in tiles:
-        dataset = api.get_dataset_by_cell(**tile_query)
-        assert dataset['blue'].size
-
-
-def make_pgsqljson_match_yaml_load(data):
-    """Un-munge YAML data passed through PostgreSQL JSON"""
-    for key, value in data.items():
-        if isinstance(value, dict):
-            data[key] = make_pgsqljson_match_yaml_load(value)
-        elif isinstance(value, datetime):
-            data[key] = value.strftime(JSON_DATE_FORMAT)
-        elif value is None:
-            data[key] = {}
-    return data
+    geobox = GeoBox(200, 200, Affine(25, 0.0, 1500000, 0.0, -25, -3900000), CRS('EPSG:3577'))
+    observations = datacube.product_observations(product='ls5_nbar_albers', geopolygon=geobox.extent)
+    sources = datacube.product_sources(observations, lambda ds: ds.center_time, 'time',
+                                       'seconds since 1970-01-01 00:00:00')
+    data = datacube.product_data(sources, geobox, input_type.measurements.values())
+    assert data.blue.shape == (1, 200, 200)

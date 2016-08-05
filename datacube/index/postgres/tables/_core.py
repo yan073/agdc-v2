@@ -6,11 +6,10 @@ from __future__ import absolute_import
 
 import logging
 
-from sqlalchemy import MetaData, TIMESTAMP
-from sqlalchemy.ext.compiler import compiles
+from sqlalchemy import MetaData
 from sqlalchemy.schema import CreateSchema
-from sqlalchemy.sql.expression import Executable, ClauseElement
-from sqlalchemy.sql.functions import GenericFunction
+
+from ._sql import TYPES_INIT_SQL
 
 USER_ROLES = ('agdc_user', 'agdc_ingest', 'agdc_manage', 'agdc_admin')
 
@@ -70,7 +69,7 @@ def ensure_db(engine, with_permissions=True):
             _LOG.info('Creating schema.')
             c.execute(CreateSchema(SCHEMA_NAME))
             _LOG.info('Creating tables.')
-            c.execute(_FUNCTIONS)
+            c.execute(TYPES_INIT_SQL)
             METADATA.create_all(c)
             c.execute('commit')
         except:
@@ -91,22 +90,68 @@ def ensure_db(engine, with_permissions=True):
 
         grant insert on {schema}.dataset,
                         {schema}.dataset_location,
-                        {schema}.dataset_source,
-                        {schema}.dataset_storage,
-                        {schema}.storage_unit to agdc_ingest;
+                        {schema}.dataset_source to agdc_ingest;
         grant usage, select on all sequences in schema {schema} to agdc_ingest;
 
-        grant insert on {schema}.storage_type,
-                        {schema}.collection,
-                        {schema}.metadata_type to agdc_manage;
-
-        -- Allow deletion of storage types that have no storage units.
-        grant delete on {schema}.storage_type to agdc_manage;
+        -- (We're only granting deletion of types that have nothing written yet: they can't delete the data itself)
+        grant insert, delete on {schema}.dataset_type,
+                                {schema}.metadata_type to agdc_manage;
+        -- Allow creation of indexes, views
+        grant create on schema {schema} to agdc_manage;
         """.format(schema=SCHEMA_NAME))
 
     c.close()
 
     return is_new
+
+
+def _pg_exists(conn, name):
+    """
+    Does a postgres object exist?
+    :rtype bool
+    """
+    return conn.execute("SELECT to_regclass(%s)", name).scalar() is not None
+
+
+def database_exists(engine):
+    """
+    Have they init'd this database?
+    """
+    return has_schema(engine, engine)
+
+
+def schema_is_latest(engine):
+    """
+    Is the schema up-to-date?
+    """
+    is_unification = _pg_exists(engine, schema_qualified('dataset_type'))
+    is_updated = not _pg_exists(engine, schema_qualified('uq_dataset_source_dataset_ref'))
+
+    # We may have versioned schema in the future.
+    # For now, we know updates ahve been applied if the dataset_type table exists,
+    return is_unification and is_updated
+
+
+def update_schema(engine):
+    is_unification = _pg_exists(engine, schema_qualified('dataset_type'))
+    if not is_unification:
+        raise ValueError('Pre-unification database cannot be updated.')
+
+    # Remove surrogate key from dataset_source: it makes the table larger for no benefit.
+    if _pg_exists(engine, schema_qualified('uq_dataset_source_dataset_ref')):
+        _LOG.info('Applying surrogate-key update')
+        engine.execute("""
+        begin;
+          alter table agdc.dataset_source drop constraint pk_dataset_source;
+          alter table agdc.dataset_source drop constraint uq_dataset_source_dataset_ref;
+          alter table agdc.dataset_source add constraint pk_dataset_source primary key(dataset_ref, classifier);
+          alter table agdc.dataset_source drop column id;
+        commit;
+        """)
+        _LOG.info('Completed surrogate-key update')
+
+    if not engine.execute("SELECT 1 FROM pg_type WHERE typname = 'float8range'").scalar():
+        engine.execute(TYPES_INIT_SQL)
 
 
 def _ensure_role(engine, name, inherits_from=None, add_user=False, create_db=False):
@@ -124,27 +169,31 @@ def _ensure_role(engine, name, inherits_from=None, add_user=False, create_db=Fal
     engine.execute(' '.join(sql))
 
 
-def create_user(engine, username, key, role):
+def create_user(conn, username, key, role):
     if role not in USER_ROLES:
         raise ValueError('Unknown role %r. Expected one of %r' % (role, USER_ROLES))
 
-    engine.execute(
+    conn.execute(
         'create user {username} password %s in role {role}'.format(username=username, role=role),
         key
     )
+
+
+def drop_user(engine, username):
+    engine.execute('drop role {username}'.format(username=username))
 
 
 def grant_role(engine, role, users):
     if role not in USER_ROLES:
         raise ValueError('Unknown role %r. Expected one of %r' % (role, USER_ROLES))
 
-    engine.execute(
-        'grant {role} to {users}'.format(users=', '.join(users), role=role)
-    )
+    with engine.begin():
+        engine.execute('revoke {roles} from {users}'.format(users=', '.join(users), roles=', '.join(USER_ROLES)))
+        engine.execute('grant {role} to {users}'.format(users=', '.join(users), role=role))
 
 
-def has_role(engine, role_name):
-    return bool(engine.execute('select rolname from pg_roles where rolname=%s', role_name).fetchall())
+def has_role(conn, role_name):
+    return bool(conn.execute('select rolname from pg_roles where rolname=%s', role_name).fetchall())
 
 
 def has_schema(engine, connection):
@@ -153,35 +202,3 @@ def has_schema(engine, connection):
 
 def drop_db(connection):
     connection.execute('drop schema if exists %s cascade;' % SCHEMA_NAME)
-
-
-class View(Executable, ClauseElement):
-    def __init__(self, name, select):
-        self.name = name
-        self.select = select
-
-
-@compiles(View)
-def visit_create_view(element, compiler, **kw):
-    return "CREATE VIEW %s AS %s" % (
-        element.name,
-        compiler.process(element.select, literal_binds=True)
-    )
-
-
-_FUNCTIONS = """
-create or replace function {schema}.common_timestamp(text)
-returns timestamp with time zone as $$
-select ($1)::timestamp at time zone 'utc';
-$$ language sql immutable returns null on null input;
-""".format(schema=SCHEMA_NAME)
-
-
-# Register the function with SQLAlchemhy.
-# pylint: disable=too-many-ancestors
-class CommonTimestamp(GenericFunction):
-    type = TIMESTAMP(timezone=True)
-    package = 'agdc'
-    identifier = 'common_timestamp'
-
-    name = '%s.common_timestamp' % SCHEMA_NAME

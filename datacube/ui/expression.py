@@ -18,8 +18,12 @@ Data Access Module
 from __future__ import absolute_import, print_function, division
 
 import re
+from datetime import datetime
+
+from dateutil import tz
 from pypeg2 import word, attr, List, maybe_some, parse as peg_parse
 
+from datacube.model import Range
 
 FIELD_NAME = attr(u'field_name', word)
 
@@ -28,6 +32,9 @@ NUMBER = re.compile(r"[-+]?(\d*\.\d+|\d+\.\d*|\d+)")
 LIMITED_STRING = re.compile(r"[a-zA-Z][\w\._-]*")
 # Inside string quotation marks. Kept simple. We're not supporting escapes or much else yet...
 STRING_CONTENTS = re.compile(r"[\w\s\._-]*")
+
+# Either a day '2016-02-20' or a month '2016-02'
+DATE = re.compile(r"\d{4}-\d{2}(-\d{2})?")
 
 
 class Expr(object):
@@ -59,6 +66,9 @@ class StringValue(Expr):
     def query_repr(self, get_field):
         return self.value
 
+    def as_value(self):
+        return self.value
+
 
 class NumericValue(Expr):
     def __init__(self, value=None):
@@ -75,6 +85,33 @@ class NumericValue(Expr):
     def query_repr(self, get_field):
         return float(self.value)
 
+    def as_value(self):
+        return float(self.value)
+
+
+class DateValue(Expr):
+    def __init__(self, value=None):
+        self.value = value
+
+    grammar = attr(u'value', DATE)
+
+    def __str__(self):
+        return self.value
+
+    def __repr__(self):
+        return self.value
+
+    def query_repr(self, get_field):
+        return self.as_value()
+
+    def as_value(self):
+        parts = self.value.split('-')
+        parts.reverse()
+        year = parts.pop()
+        month = parts.pop()
+        day = parts[0] if parts else '1'
+        return datetime(int(year), int(month), int(day), tzinfo=tz.tzutc())
+
 
 class EqualsExpression(Expr):
     def __init__(self, field_name=None, value=None):
@@ -89,6 +126,9 @@ class EqualsExpression(Expr):
     def query_repr(self, get_field):
         return get_field(self.field_name) == self.value.query_repr(get_field)
 
+    def as_query(self):
+        return {self.field_name: self.value.as_value()}
+
 
 class BetweenExpression(Expr):
     def __init__(self, field_name=None, low_value=None, high_value=None):
@@ -98,7 +138,9 @@ class BetweenExpression(Expr):
 
     grammar = [
         (attr(u'low_value', NumericValue), u'<', FIELD_NAME, u'<', attr(u'high_value', NumericValue)),
-        (attr(u'high_value', NumericValue), u'>', FIELD_NAME, u'>', attr(u'low_value', NumericValue))
+        (attr(u'high_value', NumericValue), u'>', FIELD_NAME, u'>', attr(u'low_value', NumericValue)),
+        (attr(u'low_value', DateValue), u'<', FIELD_NAME, u'<', attr(u'high_value', DateValue)),
+        (attr(u'high_value', DateValue), u'>', FIELD_NAME, u'>', attr(u'low_value', DateValue))
     ]
 
     def __str__(self):
@@ -110,6 +152,9 @@ class BetweenExpression(Expr):
             self.high_value.query_repr(get_field)
         )
 
+    def as_query(self):
+        return {self.field_name: Range(self.low_value.as_value(), self.high_value.as_value())}
+
 
 class ExpressionList(List):
     grammar = maybe_some([EqualsExpression, BetweenExpression])
@@ -120,28 +165,23 @@ class ExpressionList(List):
 
 def _parse_raw_expressions(*expression_text):
     """
-    :rtype: Expr
+    :rtype: ExpressionList
     :type expression_text: str
     """
     return peg_parse(' '.join(expression_text), ExpressionList)
 
 
-class UnknownFieldException(Exception):
-    pass
-
-
-def parse_expressions(get_field, *expression_text):
+def parse_expressions(*expression_text):
     """
+    Parse an expression string into a dictionary suitable for .search() methods.
+
     :type expression_text: list[str]
-    :type get_field: (str) -> datacube.index.fields.Field
-    :rtype: list[datacube.index.fields.Expression]
+    :rtype: dict[str, object]
     """
-
-    def _get_field(name):
-        field = get_field(name)
-        if field is None:
-            raise UnknownFieldException("Unknown field '%s'" % name)
-        return field
-
     raw_expr = _parse_raw_expressions(' '.join(expression_text))
-    return [expr.query_repr(_get_field) for expr in raw_expr]
+
+    out = {}
+    for expr in raw_expr:
+        out.update(expr.as_query())
+
+    return out

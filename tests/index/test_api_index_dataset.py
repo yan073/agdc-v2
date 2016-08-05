@@ -2,10 +2,16 @@
 
 from __future__ import absolute_import
 
-import datetime
+import pytest
 
-from datacube.index._datasets import _ensure_dataset
-from datacube.model import Collection, DatasetOffsets, DatasetMatcher, MetadataType
+import datetime
+from copy import deepcopy
+from collections import namedtuple
+from contextlib import contextmanager
+
+from datacube.index.exceptions import DuplicateRecordError
+from datacube.index._datasets import DatasetResource
+from datacube.model import DatasetType, MetadataType, Dataset
 
 _nbar_uuid = 'f2f12372-8366-11e5-817e-1040f381a756'
 _ortho_uuid = '5cf41d98-eda9-11e4-8a8e-1040f381a756'
@@ -20,11 +26,11 @@ _EXAMPLE_NBAR = {
     'ga_level': 'P54',
     'size_bytes': 4550,
     'platform': {'code': 'LANDSAT_8'},
-    'creation_dt': datetime.datetime(2014, 1, 26, 2, 5, 23, 126373),
+    'creation_dt': datetime.datetime(2014, 1, 26, 2, 5, 23, 126373).isoformat(),
     'instrument': {'name': 'OLI_TIRS'},
     'format': {'name': 'GeoTIFF'},
     'extent': {
-        'center_dt': datetime.datetime(2014, 1, 26, 2, 5, 23, 126373),
+        'center_dt': datetime.datetime(2014, 1, 26, 2, 5, 23, 126373).isoformat(),
         'coord': {
             'ul': {'lat': -26.37259, 'lon': 116.58914},
             'lr': {'lat': -28.48062, 'lon': 118.96145},
@@ -43,7 +49,7 @@ _EXAMPLE_NBAR = {
                     'scene_id': 'LC81120792014026ASA00'
                 },
                 'extent': {
-                    'center_dt': datetime.datetime(2014, 1, 26, 2, 5, 23, 126373),
+                    'center_dt': datetime.datetime(2014, 1, 26, 2, 5, 23, 126373).isoformat(),
                     'coord': {
                         'ul': {'lat': -26.37259, 'lon': 116.58914},
                         'lr': {'lat': -28.48062, 'lon': 118.96145},
@@ -54,7 +60,7 @@ _EXAMPLE_NBAR = {
                 'size_bytes': 1854924494,
                 'platform': {
                     'code': 'LANDSAT_8'},
-                'creation_dt': datetime.datetime(2015, 4, 7, 0, 58, 8),
+                'creation_dt': datetime.datetime(2015, 4, 7, 0, 58, 8).isoformat(),
                 'instrument': {'name': 'OLI_TIRS'},
                 'checksum_path': 'package.sha1',
                 'ga_label': 'LS8_OLITIRS_OTH_P51_GALPGS01-002_112_079_20140126',
@@ -101,7 +107,7 @@ _EXAMPLE_NBAR = {
                             'size_bytes': 637660782,
                             'platform': {
                                 'code': 'LANDSAT_8'},
-                            'creation_dt': datetime.datetime(2015, 4, 22, 6, 32, 4),
+                            'creation_dt': datetime.datetime(2015, 4, 22, 6, 32, 4).isoformat(),
                             'instrument': {'name': 'OLI_TIRS'},
                             'format': {
                                 'name': 'MD'},
@@ -118,56 +124,80 @@ _EXAMPLE_NBAR = {
 
 _EXAMPLE_METADATA_TYPE = MetadataType(
     'eo',
-    DatasetOffsets(
-        uuid_field=['id'],
-        label_field=['ga_label'],
-        creation_time_field=['creation_dt'],
-        measurements_dict=['image', 'bands'],
+    dict(
+        id=['id'],
+        label=['ga_label'],
+        creation_time=['creation_dt'],
+        measurements=['image', 'bands'],
         sources=['lineage', 'source_datasets']
     ),
-    dataset_search_fields={},
-    storage_unit_search_fields={}
+    dataset_search_fields={}
 )
 
-_EXAMPLE_COLLECTION = Collection(
-    'eo',
-    DatasetMatcher({}),
-    _EXAMPLE_METADATA_TYPE
+_EXAMPLE_DATASET_TYPE = DatasetType(
+    _EXAMPLE_METADATA_TYPE,
+    {
+        'name': 'eo',
+        'description': "",
+        'metadata_type': 'eo',
+        'metadata': {}
+    }
 )
+
+
+def _build_dataset(doc):
+    sources = {name: _build_dataset(src) for name, src in doc['lineage']['source_datasets'].items()}
+    return Dataset(_EXAMPLE_DATASET_TYPE, doc, 'file://test.zzz', sources)
+
+
+_EXAMPLE_NBAR_DATASET = _build_dataset(_EXAMPLE_NBAR)
+
+
+DatasetRecord = namedtuple('DatasetRecord', ['id', 'metadata', 'dataset_type_ref', 'local_uri'])
 
 
 class MockDb(object):
     def __init__(self):
-        self.dataset = []
+        self.dataset = {}
         self.dataset_source = set()
-        self.already_ingested = set()
 
-    def insert_dataset(self, metadata_doc, dataset_id, collection_id=None):
+    @contextmanager
+    def begin(self):
+        yield self
+
+    def get_dataset(self, id):
+        return self.dataset.get(id, None)
+
+    def ensure_dataset_location(self, *args, **kwargs):
+        return
+
+    def insert_dataset(self, metadata_doc, dataset_id, dataset_type_id):
         # Will we pretend this one was already ingested?
-        if dataset_id in self.already_ingested:
-            return False
+        if dataset_id in self.dataset:
+            raise DuplicateRecordError('already ingested')
 
-        self.dataset.append((metadata_doc, dataset_id, collection_id))
+        self.dataset[dataset_id] = DatasetRecord(dataset_id, deepcopy(metadata_doc), dataset_type_id, None)
         return True
 
     def insert_dataset_source(self, classifier, dataset_id, source_dataset_id):
         self.dataset_source.add((classifier, dataset_id, source_dataset_id))
 
 
-class MockCollectionResource(object):
-    def __init__(self, collection):
-        self.collection = collection
+class MockTypesResource(object):
+    def __init__(self, type_):
+        self.type = type_
 
-    def get_for_dataset_doc(self, metadata_doc):
-        return self.collection
+    def get(self, *args, **kwargs):
+        return self.type
 
 
 def test_index_dataset():
     mock_db = MockDb()
-    mock_coll_res = MockCollectionResource(_EXAMPLE_COLLECTION)
-    _ensure_dataset(mock_db, mock_coll_res, _EXAMPLE_NBAR)
+    mock_types = MockTypesResource(_EXAMPLE_DATASET_TYPE)
+    datasets = DatasetResource(mock_db, mock_types)
+    dataset = datasets.add(_EXAMPLE_NBAR_DATASET)
 
-    ids = {d[0]['id'] for d in mock_db.dataset}
+    ids = {d.metadata['id'] for d in mock_db.dataset.values()}
     assert ids == {_nbar_uuid, _ortho_uuid, _telemetry_uuid}
 
     # Three datasets (ours and the two embedded source datasets)
@@ -181,53 +211,40 @@ def test_index_dataset():
         ('satellite_telemetry_data', _ortho_uuid, _telemetry_uuid)
     }
 
-
-def test_index_already_ingested_dataset():
-    mock_db = MockDb()
-    mock_coll_res = MockCollectionResource(_EXAMPLE_COLLECTION)
-    mock_db.already_ingested = {_nbar_uuid}
-    _ensure_dataset(mock_db, mock_coll_res, _EXAMPLE_NBAR)
-
     # Nothing ingested, because we reported the first as already ingested.
-    assert len(mock_db.dataset) == 0
+    dataset = datasets.add(_EXAMPLE_NBAR_DATASET)
+    assert len(mock_db.dataset) == 3
+    assert len(mock_db.dataset_source) == 2
 
-    assert len(mock_db.dataset_source) == 0
+    ds2 = deepcopy(_EXAMPLE_NBAR_DATASET)
+    ds2.metadata_doc['product_type'] = 'zzzz'
+    with pytest.raises(ValueError):
+        dataset = datasets.add(ds2)
 
 
 def test_index_already_ingested_source_dataset():
     mock_db = MockDb()
-    mock_coll_res = MockCollectionResource(_EXAMPLE_COLLECTION)
-    mock_db.already_ingested = {_ortho_uuid, _telemetry_uuid}
-    _ensure_dataset(mock_db, mock_coll_res, _EXAMPLE_NBAR)
+    mock_types = MockTypesResource(_EXAMPLE_DATASET_TYPE)
+    datasets = DatasetResource(mock_db, mock_types)
+    dataset = datasets.add(_EXAMPLE_NBAR_DATASET.sources['ortho'])
 
-    # Only the first dataset ingested
-    assert len(mock_db.dataset) == 1
-    assert mock_db.dataset[0][1] == _nbar_uuid
-
-    # It should have been linked to the ortho.
+    assert len(mock_db.dataset) == 2
     assert len(mock_db.dataset_source) == 1
-    assert mock_db.dataset_source == {
-        ('ortho', _nbar_uuid, _ortho_uuid),
-    }
+
+    dataset = datasets.add(_EXAMPLE_NBAR_DATASET)
+    assert len(mock_db.dataset) == 3
+    assert len(mock_db.dataset_source) == 2
 
 
 def test_index_two_levels_already_ingested():
     mock_db = MockDb()
-    mock_coll_res = MockCollectionResource(_EXAMPLE_COLLECTION)
-    # RAW was already ingested.
-    mock_db.already_ingested = {_telemetry_uuid}
-    _ensure_dataset(mock_db, mock_coll_res, _EXAMPLE_NBAR)
+    mock_types = MockTypesResource(_EXAMPLE_DATASET_TYPE)
+    datasets = DatasetResource(mock_db, mock_types)
+    dataset = datasets.add(_EXAMPLE_NBAR_DATASET.sources['ortho'].sources['satellite_telemetry_data'])
 
-    ids = {d[0]['id'] for d in mock_db.dataset}
-    assert ids == {_nbar_uuid, _ortho_uuid}
+    assert len(mock_db.dataset) == 1
+    assert len(mock_db.dataset_source) == 0
 
-    # Two datasets (the telemetry data already ingested)
-    assert len(mock_db.dataset) == 2
-
-    # Our three datasets should be linked together
-    # Nbar -> Ortho -> Telemetry
+    dataset = datasets.add(_EXAMPLE_NBAR_DATASET)
+    assert len(mock_db.dataset) == 3
     assert len(mock_db.dataset_source) == 2
-    assert mock_db.dataset_source == {
-        ('ortho', _nbar_uuid, _ortho_uuid),
-        ('satellite_telemetry_data', _ortho_uuid, _telemetry_uuid)
-    }

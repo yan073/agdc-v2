@@ -89,12 +89,12 @@ def get_ang_dataset(path):
     for image in path.glob('*-P1S-ABOM_GEOM_*-HIMAWARI8-AHI.nc'):
         match = band_re.match(str(image)).groups()
         images['%s_%s' % match] = {
-            'path': str(image),
+            'path': image.name,
             'layer': 'solar_zenith_angle',
         }
     if not images:
         return None
-    return get_skeleton(str(images['SOLAR_2000']['path']), 'GEOM_SOLAR', images)
+    return get_skeleton(str(path/images['SOLAR_2000']['path']), 'GEOM_SOLAR', images)
 
 
 def get_obs_dataset(path):
@@ -103,12 +103,12 @@ def get_obs_dataset(path):
     for image in path.glob('*-P1S-ABOM_OBS_*-HIMAWARI8-AHI.nc'):
         match = band_re.match(str(image)).groups()
         images['%s_%s' % match] = {
-            'path': str(image),
+            'path': image.name,
             'layer': 'channel_00' + match[0] + '_scaled_radiance',
         }
     if not images:
         return None
-    return get_skeleton(str(images['01_2000']['path']), 'OBS', images)
+    return get_skeleton(str(path/images['01_2000']['path']), 'OBS', images)
 
 
 def get_brf_dataset(path):
@@ -117,12 +117,12 @@ def get_brf_dataset(path):
     for image in path.glob('*-P1S-ABOM_BRF_*-HIMAWARI8-AHI.nc'):
         match = band_re.match(str(image)).groups()
         images['%s_%s' % match] = {
-            'path': str(image),
+            'path': image.name,
             'layer': 'channel_00' + match[0] + '_brf',
         }
     if not images:
         return None
-    return get_skeleton(str(images['01_2000']['path']), 'BRF', images)
+    return get_skeleton(str(path/images['01_2000']['path']), 'BRF', images)
 
 
 def prepare_dataset(path):
@@ -135,25 +135,43 @@ def prepare_dataset(path):
     return [brf]
 
 
-@click.command(help="Prepare Himawari 8 dataset for ingestion into the Data Cube.")
-@click.argument('datasets',
-                type=click.Path(exists=True, readable=True, writable=True),
-                nargs=-1)
-def main(datasets):
-    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
-
+def make_datasets(datasets):
     for dataset in datasets:
         path = Path(dataset)
 
         logging.info("Processing %s", path)
         documents = prepare_dataset(path)
-        if documents:
+        if not documents:
+            logging.info("No datasets found in %s", path)
+            continue
+        yield path, documents
+
+
+def absolutify_paths(doc, path):
+    for band in doc['image']['bands'].values():
+        band['path'] = str(path/band['path'])
+    return doc
+
+
+@click.command(help="Prepare Himawari 8 dataset for ingestion into the Data Cube.")
+@click.option('--output', help="Write datasets into this file",
+              type=click.Path(exists=False, writable=True, dir_okay=False))
+@click.argument('datasets',
+                type=click.Path(exists=True, readable=True, writable=False),
+                nargs=-1)
+def main(output, datasets):
+    logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.INFO)
+
+    if output:
+        docs = (absolutify_paths(doc, path) for path, docs in make_datasets(datasets) for doc in docs)
+        with open(output, 'w') as stream:
+            yaml.dump_all(docs, stream)
+    else:
+        for path, docs in make_datasets(datasets):
             yaml_path = str(path.joinpath('agdc-metadata.yaml'))
-            logging.info("Writing %s dataset(s) into %s", len(documents), yaml_path)
+            logging.info("Writing %s dataset(s) into %s", len(docs), yaml_path)
             with open(yaml_path, 'w') as stream:
-                yaml.dump_all(documents, stream)
-        else:
-            logging.info("No datasets discovered. Bye!")
+                yaml.dump_all(docs, stream)
 
 
 if __name__ == "__main__":
