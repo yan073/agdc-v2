@@ -4,9 +4,11 @@ import logging
 import numpy as np
 from collections import defaultdict
 from itertools import product
-from datetime import datetime, timedelta
+from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
+
+from functools import reduce
 from pandas import to_datetime
 import rasterio
 import dateutil.tz
@@ -17,13 +19,13 @@ from datacube.utils import intersect_points, union_points
 from datacube.utils import read_documents
 from datacube.model import DatasetType, GeoPolygon
 from datacube.model.utils import make_dataset, xr_apply, datasets_to_doc
-from datacube.api.model_v1 import Ls57Arg25Bands
-from datacube.api.tci_utils import calculate_tci
-from datacube.api.utils_v1 import calculate_stack_statistic_count_observed, calculate_stack_statistic_median
-from datacube.api.utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
-from datacube.api.utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
-from datacube.api.utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
-from dateutil.tz import tzutc, tzlocal
+from .model_v1 import Ls57Arg25Bands
+from .tci_utils import calculate_tci
+from .utils_v1 import calculate_stack_statistic_count_observed, calculate_stack_statistic_median
+from .utils_v1 import calculate_stack_statistic_min, calculate_stack_statistic_max
+from .utils_v1 import calculate_stack_statistic_mean, calculate_stack_statistic_percentile
+from .utils_v1 import calculate_stack_statistic_variance, calculate_stack_statistic_standard_deviation
+from dateutil.tz import tzlocal
 
 _log = logging.getLogger(__name__)
 
@@ -31,7 +33,7 @@ _log = logging.getLogger(__name__)
 def product_lookup(sat, dataset_type):
     """
     Finds product name from dataset type and sensor name
-    :param self: input dataset type and sensor name
+    :param sat: input dataset type and sensor name
     :param dataset_type: It can be pqa within nbar
     :return: product name like 'ls8_nbar_albers'
     """
@@ -48,14 +50,13 @@ def product_lookup(sat, dataset_type):
     my_dict = defaultdict(list)
     for k, v in prod_list:
         my_dict[k].append(v)
-    for k, v in my_dict.iteritems():
+    for k, v in my_dict.items():
         if sat in v[0] and dataset_type in v[1]:
             return k
     return None
 
 
 def write_crs_attributes(geobox):
-
     extents = {'grid_mapping_name': geobox.crs['PROJECTION'].lower(),
                'semi_major_axis': str(geobox.geographic_extent.crs.semi_major_axis),
                'semi_minor_axis': str(geobox.geographic_extent.crs.semi_major_axis),
@@ -71,12 +72,11 @@ def write_crs_attributes(geobox):
                'spatial_ref': geobox.crs.wkt,
                'geographic': str(geobox.crs.geographic),
                'projected': str(geobox.crs.projected)
-              }
+               }
     return extents
 
 
 def write_global_attributes(self, geobox):
-
     geo_extents = geobox.geographic_extent.to_crs('EPSG:4326').points
     geo_extents = geo_extents + [geo_extents[0]]
     geospatial_bounds = "POLYGON((" + ", ".join("{0} {1}".format(*p) for p in geo_extents) + "))"
@@ -105,7 +105,7 @@ def write_global_attributes(self, geobox):
     return extents
 
 
-def do_compute(self, data, odata, dtype):     # pylint: disable=too-many-branches
+def do_compute(self, data, odata, dtype):  # pylint: disable=too-many-branches
 
     _log.info("doing computations for %s on  %s of on odata shape %s",
               self.statistic.name, datetime.now(), odata.shape)
@@ -117,7 +117,7 @@ def do_compute(self, data, odata, dtype):     # pylint: disable=too-many-branche
         #    stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
         # else:
         #    stack = data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+self.chunk_size)).load().data
-        stack = data[x_offset: 4000, y_offset: y_offset+self.chunk_size]
+        stack = data[x_offset: 4000, y_offset: y_offset + self.chunk_size]
         _log.info("stack stats shape %s for %s for (%03d ,%03d) x_offset %d for y_offset %d",
                   stack.shape, self.band.name, self.x_cell, self.y_cell, x_offset, y_offset)
         stack_stat = None
@@ -146,33 +146,32 @@ def do_compute(self, data, odata, dtype):     # pylint: disable=too-many-branche
                                                               percentile=percent,
                                                               ndv=ndv, interpolation=self.interpolation)
 
-        odata[y_offset:y_offset+self.chunk_size, x_offset:4000] = stack_stat
+        odata[y_offset:y_offset + self.chunk_size, x_offset:4000] = stack_stat
         _log.info("stats finished for (%03d, %03d) band %s on %s", self.x_cell, self.y_cell, self.band.name, odata)
     return odata
 
 
-def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-locals,too-many-branches
+def fuse_data(self, gw, dtype, mindt, maxdt):  # pylint: disable=too-many-locals,too-many-branches
     # pylint: disable=too-many-statements
     my_cell = (self.x_cell, self.y_cell)
     my_data = defaultdict()
     tdata = None
     # first collect datasets for each satellite
-    for ls in list(self.satellites):
-        prodname = product_lookup(ls, self.dataset_type.value.lower())
+    for satellite in list(self.satellites):
+        prodname = product_lookup(satellite, self.dataset_type.value.lower())
         cell_info = gw.list_cells(my_cell, product=prodname, time=(mindt, maxdt))
-        my_data[ls] = cell_info
+        my_data[satellite] = cell_info
         for k, v in cell_info.iteritems():
-            _log.info("\t data sources for satellite %s %s", ls, v)
+            _log.info("\t data sources for satellite %s %s", satellite, v)
 
     ls_stack = np.zeros((1, 1, 1), dtype=dtype)
     cell_list_obj = None
     origattr = None
-    for ls in list(self.satellites):
+    for satellite in list(self.satellites):
         _log.info("\tloading dataset for %3d %4d on band  %s stats  %s  in the date range  %s %s for satellite %s",
-                  self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, ls)
-        prodname = product_lookup(ls, self.dataset_type.value.lower())
+                  self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, satellite)
         pq = None
-        cell_info = my_data[ls]
+        cell_info = my_data[satellite]
         if cell_info[my_cell]:
             cell_list_obj = cell_info[my_cell]
             data = gw.load(cell_list_obj, dask_chunks={'time': len(cell_list_obj['sources']),
@@ -184,11 +183,11 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
         origattr = data.attrs
         mask_clear = None
         if self.mask_pqa_apply:
-            prodname = product_lookup(ls, 'pqa')
+            prodname = product_lookup(satellite, 'pqa')
             pq = gw.list_cells(my_cell, product=prodname, time=(mindt, maxdt))
             if pq:
                 _log.info("\tloading pq dataset for %3d %4d on band  %s stats  %s from  %s to %s for satellite %s",
-                          self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, ls)
+                          self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, satellite)
                 pq = gw.load(pq[my_cell], dask_chunks={'time': len(pq[my_cell]['sources']),
                                                        'y': self.chunk_size, 'x': self.chunk_size})
                 for mask in self.mask_pqa_mask:
@@ -216,10 +215,9 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
             data = data.isel(solar_day=data.groupby('solar_day.year').groups[year])
         elif self.season.name == "TIDAL":
             # extract each landsat time series
-            lsdata = None
             ls_list = list()
             for xx in self.date_list:
-                if xx[2] == ls.rsplit('_', 1)[1]:
+                if xx[2] == satellite.rsplit('_', 1)[1]:
                     ls_list.append(xx)
             if len(ls_list) >= 1:
                 lsdata = [xx[4:] for xx in ls_list]
@@ -242,26 +240,25 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
                 tdata = data
                 _log.info("Received band %s data is %s ", self.band.name, data)
             else:
-                _log.info("\t No Landsat data for %s", ls)
+                _log.info("\t No Landsat data for %s", satellite)
                 continue
             _log.info("Tidal datasets constructed")
         else:
             data = data.isel(solar_day=data.groupby('solar_day.season').groups[season_dict[self.season.name]])
-        tci_data = None
+
         if self.band.name in [t.name for t in Ls57Arg25Bands]:
             data = get_band_data(self, data)
-            # data = data.chunk(chunks=(self.chunk_size, self.chunk_size))
         else:
             data = get_derive_data(self, data)
 
         stack = np.zeros((len(data), 4000, 4000), dtype=dtype)
-        _log.info("\t Time to start stacking for %s %s", ls, str(datetime.now()))
+        _log.info("\t Time to start stacking for %s %s", satellite, str(datetime.now()))
         for x_offset, y_offset in product(range(0, 4000, 4000),
                                           range(0, 4000, 400)):
-            stack[:, y_offset:y_offset+400, x_offset:4000] =  \
-                 data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset+400)).load().data
+            stack[:, y_offset:y_offset + 400, x_offset:4000] = \
+                data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset + 400)).load().data
             _log.info("\t Time to stack 400 chunks  %s ", str(datetime.now()))
-        _log.info("\t Time to finish stacking for %s %s", ls, str(datetime.now()))
+        _log.info("\t Time to finish stacking for %s %s", satellite, str(datetime.now()))
         if ls_stack.any():
             ls_stack = np.vstack((stack, ls_stack))
         else:
@@ -273,7 +270,7 @@ def fuse_data(self, gw, dtype, mindt, maxdt):   # pylint: disable=too-many-local
 
 
 def get_derive_data(self, data):
-    ndvi = None
+    output_data = None
     sat = ",".join(self.satellites)
     _log.info("getting derived data for %s for satellite %s", self.dataset_type.name, sat)
 
@@ -284,29 +281,29 @@ def get_derive_data(self, data):
     sw1 = data.swir1
     sw2 = data.swir2
     if self.band.name == "NDFI":
-        ndvi = (sw1 - nir) / (sw1 + nir)
-        ndvi.name = "NDFI data"
-    if self.band.name == "NDVI":
-        ndvi = (nir - red) / (nir + red)
-        ndvi.name = "NDVI data"
-    if self.band.name == "NDWI":
-        ndvi = (green - nir) / (green + nir)
-        ndvi.name = "NDWI data"
-    if self.band.name == "MNDWI":
-        ndvi = (green - sw1) / (green + sw1)
-        ndvi.name = "MNDWI data"
-    if self.band.name == "NBR":
-        ndvi = (nir - sw2) / (nir + sw2)
-        ndvi.name = "NBR data"
-    if self.band.name == "EVI":
+        output_data = (sw1 - nir) / (sw1 + nir)
+        output_data.name = "NDFI data"
+    elif self.band.name == "NDVI":
+        output_data = (nir - red) / (nir + red)
+        output_data.name = "NDVI data"
+    elif self.band.name == "NDWI":
+        output_data = (green - nir) / (green + nir)
+        output_data.name = "NDWI data"
+    elif self.band.name == "MNDWI":
+        output_data = (green - sw1) / (green + sw1)
+        output_data.name = "MNDWI data"
+    elif self.band.name == "NBR":
+        output_data = (nir - sw2) / (nir + sw2)
+        output_data.name = "NBR data"
+    elif self.band.name == "EVI":
         g, l, c1, c2 = self.evi_args  # pylint: disable=unpacking-non-sequence
-        ndvi = g * ((nir - red) / (nir + c1 * red - c2 * blue + l))
-        ndvi.name = "EVI data"
+        output_data = g * ((nir - red) / (nir + c1 * red - c2 * blue + l))
+        output_data.name = "EVI data"
         _log.info("EVI cooefficients used are G=%f, l=%f, c1=%f, c2=%f", g, l, c1, c2)
-    if self.band.name == "TCI":
-        ndvi = calculate_tci(self.band.name, sat, blue, green, red, nir, sw1, sw2)
-        _log.info(" shape of TCI array is %s", ndvi.shape)
-    return ndvi
+    elif self.band.name == "TCI":
+        output_data = calculate_tci(self.band.name, sat, blue, green, red, nir, sw1, sw2)
+        _log.info(" shape of TCI array is %s", output_data.shape)
+    return output_data
 
 
 def get_band_data(self, data):  # pylint: disable=too-many-branches
@@ -327,7 +324,6 @@ def get_band_data(self, data):  # pylint: disable=too-many-branches
 
 
 def apply_mask(self):
-
     ga_pixel_bit = {name: True for name in
                     ('swir2_saturated',
                      'red_saturated',
@@ -444,7 +440,6 @@ def get_app_metadata(config):
 
 
 def stats_extra_metadata(config, ds, cell_list_obj, filename):
-
     geobox = cell_list_obj['geobox']
 
     global_attributes = config['global_attributes']
@@ -465,6 +460,7 @@ def stats_extra_metadata(config, ds, cell_list_obj, filename):
                                app_info=get_app_metadata(config),
                                valid_data=GeoPolygon(valid_data, geobox.crs))
         return dataset
+
     sources = cell_list_obj['sources']
     datasets = xr_apply(sources, _make_dataset, dtype='O')
     ds['dataset'] = datasets_to_doc(datasets)
@@ -477,17 +473,10 @@ def stats_extra_metadata(config, ds, cell_list_obj, filename):
     return
 
 
-def get_filename(config, tile_index, sources):
-    file_path_template = str(Path(config['location'], config['file_path_template']))
-    return file_path_template.format(tile_index=tile_index,
-                                     start_time=to_datetime(sources.time.values[0]).strftime('%Y%m%d%H%M%S%f'),
-                                     end_time=to_datetime(sources.time.values[-1]).strftime('%Y%m%d%H%M%S%f'))
-
-
 def get_mean_longitude(cell_dataset):
     x, y = _get_spatial_dims(cell_dataset)
-    mean_lat = float(cell_dataset[x][0] + cell_dataset[x][-1])/2.
-    mean_lon = float(cell_dataset[y][0] + cell_dataset[y][-1])/2.
+    mean_lat = float(cell_dataset[x][0] + cell_dataset[x][-1]) / 2.
+    mean_lon = float(cell_dataset[y][0] + cell_dataset[y][-1]) / 2.
     bounds = {'left': mean_lon, 'right': mean_lon, 'top': mean_lat, 'bottom': mean_lat}
     input_crs = cell_dataset.crs.wkt
     left, bottom, right, top = rasterio.warp.transform_bounds(input_crs, 'EPSG:4326', **bounds)

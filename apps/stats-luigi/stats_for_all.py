@@ -1,33 +1,5 @@
 #!/usr/bin/env python
 
-# ===============================================================================
-# Copyright (c)  2016 Geoscience Australia
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in the
-#       documentation and/or other materials provided with the distribution.
-#     * Neither Geoscience Australia nor the names of its contributors may be
-#       used to endorse or promote products derived from this software
-#       without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
-# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-# ===============================================================================
-
-
 """
     Calculates stats for time series LANDSAT data
     __author__ = 'u81051'
@@ -44,34 +16,27 @@ from itertools import product
 from datetime import datetime
 import abc
 from enum import Enum
+
+from dateutil.rrule import rrule, YEARLY
 import dask
 import numpy as np
 import luigi
 import luigi.contrib
 from luigi.task import flatten
-from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, writeable_dir
-from datacube.api.utils_v1 import pqa_mask_arg, statistic_arg, season_arg
-from datacube.api.model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
-from datacube.api.model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
-from datacube.api.model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
-from datacube.api.utils_v1 import PercentileInterpolation, SEASONS
-from datacube.api.utils_v1 import Season, NDV, build_season_date_criteria
+from .utils_v1 import parse_date_min, parse_date_max, PqaMask, Statistic, writeable_dir
+from .utils_v1 import pqa_mask_arg, statistic_arg, season_arg
+from .model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
+from .model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
+from .model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
+from .utils_v1 import PercentileInterpolation, SEASONS
+from .utils_v1 import Season, NDV, build_season_date_criteria
 
-from datacube.index import index_connect
-# from datacube.api import make_mask, list_flag_names
-# from datacube.api.fast import geomedian
-from datacube.api.tci_utils import calculate_tci
 import datacube.api
-import xarray as xr
 from dateutil.relativedelta import relativedelta
-# import hdmedians as hd
-from datacube.api.geo_xarray import _solar_day, _get_mean_longitude
 from datacube.api import GridWorkflow
-from datacube.storage.masking import list_flag_names, describe_variable_flags, make_mask
-from datacube.api.app_utils import product_lookup, write_crs_attributes, write_global_attributes
-from datacube.api.app_utils import do_compute, apply_mask, config_loader
-from datacube.api.app_utils import make_stats_config, stats_extra_metadata, fuse_data
-
+from .app_utils import product_lookup, write_crs_attributes, write_global_attributes
+from .app_utils import do_compute, config_loader
+from .app_utils import make_stats_config, stats_extra_metadata, fuse_data
 
 dask.set_options(get=dask.async.get_sync)
 # dask.set_options(get=dask.threaded.get)
@@ -147,10 +112,10 @@ def percentile_interpolation_arg(s):
                                      .format(s))
 
 
-class Task(luigi.Task):         # pylint: disable=metaclass-assignment
-    '''
+class Task(luigi.Task):  # pylint: disable=metaclass-assignment
+    """
        Luigi completion task
-    '''
+    """
     __metaclass__ = abc.ABCMeta
 
     def complete(self):
@@ -168,10 +133,13 @@ class Task(luigi.Task):         # pylint: disable=metaclass-assignment
         return
 
 
-class StatsTask(object):       # pylint: disable=too-many-instance-attributes
-    '''
-       Luigi starting task
-    '''
+class StatsRunner(object):  # pylint: disable=too-many-instance-attributes
+    """
+    Parse command line arguments then run a task to produce statistic output.
+
+    Uses ``luigi`` and :class:`EpochStatsTask`.
+    """
+
     def __init__(self, name="Band Statistics Workflow"):
 
         self.name = name
@@ -230,7 +198,7 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
 
         self.parser.add_argument("--mask-pqa-mask", help="The PQA mask to apply", action="store", dest="mask_pqa_mask",
                                  type=pqa_mask_arg, nargs="+", choices=PqaMask,
-                                 default=[PqaMask.PQ_MASK_CLEAR_ELB,],
+                                 default=[PqaMask.PQ_MASK_CLEAR_ELB],
                                  metavar=" ".join([ts.name for ts in PqaMask]))
 
         self.parser.add_argument("--local-scheduler", help="Use local luigi scheduler rather than MPI",
@@ -323,8 +291,6 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
 
     def get_epochs(self):
 
-        from dateutil.rrule import rrule, YEARLY
-
         for season in self.seasons:
             if season.name == "TIDAL":
                 yield self.get_tidal_date_ranges()
@@ -341,7 +307,7 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
         dt_rn.sort(key=lambda date: datetime.strptime(date, '%Y-%m-%dT%H:%M:%S'))
         dt_rn = [datetime.strptime(date, "%Y-%m-%dT%H:%M:%S").date() for date in dt_rn]
         acq_min = dt_rn[0]
-        acq_max = dt_rn[len(dt_rn)-1]
+        acq_max = dt_rn[len(dt_rn) - 1]
         return acq_min, acq_max
 
     @staticmethod
@@ -355,8 +321,8 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
     def create_all_tasks(self):
         cells = (self.x_min, self.y_min)
         _log.info(" cell values  %s", cells)
-        for ((acq_min, acq_max), season, band, statistic) in product(self.get_epochs(), self.get_seasons(),
-                                                                     self.bands, self.statistics):
+        for (acq_min, acq_max), season, band, statistic in product(self.get_epochs(), self.get_seasons(),
+                                                                   self.bands, self.statistics):
             _log.info("epoch returns date min %s max %s", acq_min, acq_max)
 
             acq_min_extended, acq_max_extended, criteria = build_season_date_criteria(acq_min, acq_max,
@@ -371,55 +337,53 @@ class StatsTask(object):       # pylint: disable=too-many-instance-attributes
             _log.info("Creating task at %s for epoch stats %s %s %s %s %s crit min date %s , crit max date %s",
                       str(datetime.now()),
                       self.x_min, self.y_min, acq_min_extended, acq_max_extended, season, mindt, maxdt)
-            yield self.create_new_task(x=self.x_min, y=self.y_min, acq_min=acq_min_extended, acq_max=acq_max_extended,
-                                       season=season, dataset_type=self.dataset_type, band=band,
-                                       mask_pqa_apply=self.mask_pqa_apply, mask_pqa_mask=self.mask_pqa_mask,
-                                       chunk_size=self.chunk_size, statistic=statistic, statistics=self.statistics,
-                                       interpolation=self.interpolation, evi_args=self.evi_args, period=self.period,
-                                       date_list=self.date_list)
 
-    # pylint: disable=too-many-arguments,too-many-locals
-    def create_new_task(self, x, y, acq_min, acq_max, season, dataset_type, band, mask_pqa_apply,
-                        mask_pqa_mask, chunk_size, statistic, statistics, interpolation,
-                        evi_args, period, date_list):
-        return EpochStatisticsTask(x_cell=x, y_cell=y, acq_min=acq_min, acq_max=acq_max,
-                                   season=season, satellites=self.satellites,
-                                   dataset_type=dataset_type, band=band,
-                                   mask_pqa_apply=mask_pqa_apply, mask_pqa_mask=mask_pqa_mask,
-                                   chunk_size=chunk_size, statistic=statistic,
-                                   statistics=statistics, interpolation=interpolation,
-                                   output_directory=self.output_directory, evi_args=evi_args, period=period,
-                                   date_list=date_list)
+            yield EpochStatisticsTask(x_cell=self.x_min, y_cell=self.y_min, acq_min=acq_min_extended,
+                                      acq_max=acq_max_extended, season=season, satellites=self.satellites,
+                                      dataset_type=self.dataset_type, band=band,
+                                      mask_pqa_apply=self.mask_pqa_apply, mask_pqa_mask=self.mask_pqa_mask,
+                                      chunk_size=self.chunk_size, statistic=statistic,
+                                      statistics=self.statistics, interpolation=self.interpolation,
+                                      evi_args=self.evi_args, period=self.period, date_list=self.date_list,
+                                      output_directory=self.output_directory, )
 
     def run(self):
-
         self.setup_arguments()
         self.process_arguments(self.parser.parse_args())
         self.log_arguments()
+        tasks = self.create_all_tasks()
+
         if self.local_scheduler:
-            luigi.build(self.create_all_tasks(), local_scheduler=self.local_scheduler, workers=self.workers)
+            luigi.build(tasks, local_scheduler=self.local_scheduler, workers=self.workers)
         else:
             import luigi.contrib.mpi as mpi
-            mpi.run(self.create_all_tasks())
+            mpi.run(tasks)
 
 
-class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
-    '''
-      Main class to do stats for each epoch/season for each stats
-    '''
+def initialise_odata(dtype):
+    shape = (4000, 4000)
+    nbar = np.empty(shape, dtype=dtype)
+    nbar.fill(NDV)
+    return nbar
+
+
+class EpochStatisticsTask(Task):  # pylint: disable=abstract-method
+    """
+    Main class to do stats for each epoch/season for each stats
+    """
     x_cell = luigi.IntParameter()
     y_cell = luigi.IntParameter()
     acq_min = luigi.DateParameter()
     acq_max = luigi.DateParameter()
     season = luigi.Parameter()
     # epochs = luigi.Parameter(is_list=True, significant=False)
-    satellites = luigi.Parameter()
+    satellites = luigi.Parameter()  # String or list of strings
     dataset_type = luigi.Parameter()
     band = luigi.Parameter()
     mask_pqa_apply = luigi.BoolParameter()
     mask_pqa_mask = luigi.Parameter()
     chunk_size = luigi.IntParameter()
-    statistic = luigi.Parameter()
+    statistic = luigi.Parameter()  # It's a freaking Enum. Luigi has EnumParameter, maybe we should use it
     statistics = luigi.Parameter()
     interpolation = luigi.Parameter()
     output_directory = luigi.Parameter()
@@ -428,35 +392,29 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
     date_list = luigi.Parameter()
 
     def output(self):
-
+        """
+        Tell Luigi where to write the output
+        """
         season = SEASONS[self.season]
         sat = "LS" + "".join([s[-1:] for s in list(self.satellites)])
         acq_min = self.acq_min
         acq_max = self.acq_max
         season_start = "{month}{day:02d}".format(month=season[0][0].name[:3], day=season[0][1])
-        season_start = season_start + "_"
+        season_start += "_"
         season_end = "{month}{day:02d}".format(month=season[1][0].name[:3], day=season[1][1])
         if self.season.name == "TIDAL":
             season_start = 'TIDAL'
             season_end = ''
         sea = season_start + season_end
         filename = "{sat}_{prod}_{x:03d}_{y:03d}_{acq_min}_{acq_max}_{sea}_{band}_{stat}.nc" \
-                   .format(sat=sat, prod=str(self.dataset_type.name).upper(),
-                           x=self.x_cell, y=self.y_cell, acq_min=acq_min, acq_max=acq_max, sea=sea,
-                           band=self.band.name, stat=self.statistic.name)
+            .format(sat=sat, prod=str(self.dataset_type.name).upper(),
+                    x=self.x_cell, y=self.y_cell, acq_min=acq_min, acq_max=acq_max, sea=sea,
+                    band=self.band.name, stat=self.statistic.name)
         return luigi.LocalTarget(os.path.join
                                  (self.output_directory, filename))
 
-    def initialise_odata(self, dtype):
-        shape = (4000, 4000)
-        nbar = np.empty(shape, dtype=dtype)
-        nbar.fill(NDV)
-        return nbar
-
-    def get_stats(self, dc, dtype, prodname):        # pylint: disable=too-many-branches,too-many-statements
+    def get_stats(self, dc, prodname, dtype=np.float32):  # pylint: disable=too-many-branches,too-many-statements
         # pylint: disable=too-many-boolean-expressions,too-many-locals
-        mindt = ()
-        maxdt = ()
         if self.season.name == "TIDAL":
             mindt = (int(self.acq_min.strftime("%Y")), int(self.acq_min.strftime("%m")),
                      int(self.acq_min.strftime("%d")), 0, 0, 0)
@@ -471,14 +429,16 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
                      int(criteria[0][0].strftime("%d")), 0, 0, 0)
             maxdt = (int(criteria[0][1].strftime("%Y")), int(criteria[0][1].strftime("%m")),
                      int(criteria[0][1].strftime("%d")), 23, 59, 59)
+
         gw = GridWorkflow(index=dc.index, product=prodname)
         data, ls_stack, cell_list_obj, origattr = fuse_data(self, gw, dtype, mindt, maxdt)
+
         # create a stats data variable
-        stats_var = None
-        odata = self.initialise_odata(dtype)
+        odata = initialise_odata(dtype)
         odata = do_compute(self, ls_stack, odata, dtype)
-            # ddata = get_derive_data(data)  # pylint: disable=redefined-variable-type
+
         _log.info("Received calculated data %s ", odata)
+
         # variable name
         stats_var = str(self.statistic.name).lower()
         if stats_var == "standard_deviation":
@@ -486,8 +446,7 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
         if stats_var == "count_observed":
             stats_var = "count"
         stats_var = stats_var + "_" + self.acq_min.strftime("%Y")
-        # data = data.isel(time=0).drop('time')
-        data_arr = None
+
         if self.season.name == "TIDAL":
             data = data.isel(points=0).drop('solar_day')
             data_arr = data.blue
@@ -496,55 +455,53 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
             data_arr = data
         data_arr.data = odata
         stats_dataset = data_arr.to_dataset(name=stats_var)
-        stats_dataset.get(stats_var).attrs.clear()
+
+        stats_var_attrs = stats_dataset.get(stats_var).attrs
+        stats_var_attrs.clear()
+
         if self.band.name in [t.name for t in Ls57Arg25Bands]:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' +
-                                                           self.band.name + 'for ' +
-                                                           self.dataset_type.name))
+            stats_var_attrs.update(dict(Comment1='Statistics calculated on ' +
+                                                 self.band.name + 'for ' +
+                                                 self.dataset_type.name))
         else:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment1='Statistics calculated on ' +
-                                                           self.dataset_type.name + ' datasets'))
-            if (self.dataset_type.name).lower() == "evi":
-                stats_dataset.get(stats_var).attrs.update(dict(Comment='Parameters ' +
-                                                               str(self.evi_args) +
-                                                               ' for G,L,C1,C2 are used respectively'))
-            if (self.dataset_type.name).lower() == "tci":
-                stats_dataset.get(stats_var).attrs.update(dict(Comment='This is based on  ' +
-                                                               self.band.name + ' algorithm'))
+            stats_var_attrs.update(dict(Comment1='Statistics calculated on ' +
+                                                 self.dataset_type.name + ' datasets'))
+            if self.dataset_type.name.lower() == "evi":
+                stats_var_attrs.update(dict(Comment='Parameters ' +
+                                                    str(self.evi_args) +
+                                                    ' for G,L,C1,C2 are used respectively'))
+            if self.dataset_type.name.lower() == "tci":
+                stats_var_attrs.update(dict(Comment='This is based on  ' +
+                                                    self.band.name + ' algorithm'))
         if self.season:
-            stats_dataset.get(stats_var).attrs.update(dict(long_name=str(self.statistic.name).lower() +
-                                                           ' seasonal statistics for ' +
-                                                           str(self.season.name).lower() + ' of ' +
-                                                           str("_".join(self.satellites)).lower()))
-            stats_dataset.get(stats_var).attrs.update(dict(standard_name=str(self.statistic.name).lower() +
-                                                           '_' + str(self.season.name).lower() + '_season_' +
-                                                           str("_".join(self.satellites)).lower()))
+            stats_var_attrs.update(dict(long_name=str(self.statistic.name).lower() +
+                                                  ' seasonal statistics for ' +
+                                                  str(self.season.name).lower() + ' of ' +
+                                                  str("_".join(self.satellites)).lower()))
+            stats_var_attrs.update(dict(standard_name=str(self.statistic.name).lower() +
+                                                      '_' + str(
+                self.season.name).lower() + '_season_' +
+                                                      str("_".join(self.satellites)).lower()))
         else:
-            stats_dataset.get(stats_var).attrs.update(dict(long_name=str(self.statistic.name).lower() +
-                                                           ' statistics for ' +
-                                                           str("_".join(self.satellites)).lower() +
-                                                           ' and duration  ' + self.acq_min.strftime("%Y%mm%dd") + '-' +
-                                                           self.acq_max.strftime("%Y%mm%dd")))
-            stats_dataset.get(stats_var).attrs.update(dict(standard_name=str(self.statistic.name).lower() +
-                                                           '_' + self.acq_min.strftime("%Y%mm%dd") + '-' +
-                                                           self.acq_max.strftime("%Y%mm%dd") + '_' +
-                                                           str("_".join(self.satellites)).lower()))
+            stats_var_attrs.update(dict(long_name=str(self.statistic.name).lower() +
+                                                  ' statistics for ' +
+                                                  str("_".join(self.satellites)).lower() +
+                                                  ' and duration  ' + self.acq_min.strftime(
+                "%Y%mm%dd") + '-' +
+                                                  self.acq_max.strftime("%Y%mm%dd")))
+            stats_var_attrs.update(dict(standard_name=str(self.statistic.name).lower() +
+                                                      '_' + self.acq_min.strftime("%Y%mm%dd") + '-' +
+                                                      self.acq_max.strftime("%Y%mm%dd") + '_' +
+                                                      str("_".join(self.satellites)).lower()))
         if 'PERCENTILE' in self.statistic.name:
-            stats_dataset.get(stats_var).attrs.update(dict(Comment2='Percentile method used ' +
-                                                           self.interpolation.name))
+            stats_var_attrs.update(dict(Comment2='Percentile method used ' +
+                                                 self.interpolation.name))
+
         _log.info("stats is ready for %s (%d, %d) for %s %s", self.dataset_type.name, self.x_cell, self.y_cell,
                   self.band.name, self.statistic.name)
         return stats_dataset, stats_var, cell_list_obj, origattr
 
-    def coordinate_attr_update(self, stats_dataset):
-
-        stats_dataset.get('x').attrs.update(dict(long_name="x coordinate of projection",
-                                                 standard_name="projection_x_coordinate", axis="X"))
-        stats_dataset.get('y').attrs.update(dict(long_name="y coordinate of projection",
-                                                 standard_name="projection_y_coordinate", axis="Y"))
-
-    def run(self):   # pylint: disable=too-many-locals
-
+    def run(self):  # pylint: disable=too-many-locals
         dc = datacube.Datacube(app="stats-app")
         prodname = product_lookup(self.satellites[0], self.dataset_type.value.lower())
         _log.info("Doing band [%s] statistic [%s] for product [%s] ", self.band.name, self.statistic.name, prodname)
@@ -555,38 +512,48 @@ class EpochStatisticsTask(Task):     # pylint: disable=abstract-method
             config = config_loader(dc.index, app_config_file)
 
         filename = self.output().path
-        dtype = np.float32
-        stats_dataset = None
+
         if str(self.statistic.name) == "COUNT_OBSERVED" or self.band.name in [t.name for t in Ls57Arg25Bands]:
             dtype = np.int16
-        stats_dataset, stats_var, cell_list_obj, origattr = self.get_stats(dc, dtype, prodname)
+        else:
+            dtype = np.float32
+
+        stats_dataset, stats_var, cell_list_obj, origattr = self.get_stats(dc, prodname, dtype=dtype)
         if stats_dataset:
-        # update x and y coordinates axis/name attributes to silence gdal warning like "Longitude/X dimension"
-            # self.coordinate_attr_update(stats_dataset)
             if config:
                 # keep original attribute from data
                 stats_dataset.get(stats_var).attrs.update(dict(crs=origattr))
                 stats_dataset.attrs = origattr
-                # import pdb; pdb.set_trace()
+
                 config = make_stats_config(dc.index, config)
                 _, flname = filename.rsplit('/', 1)
                 # write with extra metadata and index to the database
                 stats_extra_metadata(config, stats_dataset, cell_list_obj, flname)
             else:
                 # This can be used for internal testing without database ingestion
-                self.coordinate_attr_update(stats_dataset)
+                coordinate_attr_update(stats_dataset)
                 descriptor = write_global_attributes(self, cell_list_obj['geobox'])
                 stats_dataset.attrs.update(dict(descriptor))
                 stats_dataset.get(stats_var).attrs.update(dict(_FillValue='-999', grid_mapping="crs"))
-                # crs_variable = {'crs': ('i8', 0)}
-                crs_variable = {'crs':''}
+
+                crs_variable = {'crs': ''}
                 # create crs variable
                 stats_dataset = stats_dataset.assign(**crs_variable)
-                crs_attr = write_crs_attributes(cell_list_obj['geobox'])
-                stats_dataset.crs.attrs = crs_attr
+                stats_dataset.crs.attrs = write_crs_attributes(cell_list_obj['geobox'])
                 # global attributes
                 stats_dataset.to_netcdf(filename, mode='w', format='NETCDF4', engine='netcdf4',
                                         encoding={stats_var: {'zlib': True}})
+
+
+def coordinate_attr_update(stats_dataset):
+    """
+    update x and y coordinates axis/name attributes to silence gdal warning like "Longitude/X dimension"
+    """
+    stats_dataset.get('x').attrs.update(dict(long_name="x coordinate of projection",
+                                             standard_name="projection_x_coordinate", axis="X"))
+    stats_dataset.get('y').attrs.update(dict(long_name="y coordinate of projection",
+                                             standard_name="projection_y_coordinate", axis="Y"))
+
 
 if __name__ == '__main__':
     '''
@@ -615,4 +582,4 @@ if __name__ == '__main__':
      --date-list ls7/2005-04-21T01:12:43 ls5/2005-02-24T01:09:30 ls8/2013-03-23T01:25:30
     '''
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    StatsTask().run()
+    StatsRunner().run()

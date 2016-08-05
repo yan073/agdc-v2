@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 #PBS -N STATS_COUNT
 #PBS -P u46
 #PBS -q express

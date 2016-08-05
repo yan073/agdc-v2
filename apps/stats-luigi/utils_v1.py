@@ -1,52 +1,20 @@
-# ===============================================================================
-# Copyright (c)  2014 Geoscience Australia
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in the
-#       documentation and/or other materials provided with the distribution.
-#     * Neither Geoscience Australia nor the names of its contributors may be
-#       used to endorse or promote products derived from this software
-#       without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
-# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-# ===============================================================================
-
-'''
+"""
      This program is cut out, modified and reformatted. It is now compliant to PEP8.
      The original program was written by "Simon Oldfield"
      __author__ = 'u81051'
-'''
+"""
 from __future__ import absolute_import
 import argparse
-import math
 import logging
 import os
 from datetime import datetime, date
 from collections import namedtuple
 import calendar
 import numpy
-import gdal
 import gdalconst
 from dateutil.relativedelta import relativedelta
 from enum import Enum
-from scipy.ndimage import map_coordinates
-from datacube.api.model_v1 import Pq25Bands, Ls57Arg25Bands, Satellite, DatasetType, Ls8Arg25Bands
-from datacube.api.model_v1 import Wofs25Bands, NdviBands, NdwiBands, MndwiBands
-from datacube.api.model_v1 import get_bands, EviBands, NbrBands, TciBands
+from .model_v1 import get_bands, Satellite, DatasetType
 
 
 _log = logging.getLogger(__name__)
@@ -147,7 +115,6 @@ def empty_array(shape, dtype=numpy.int16, fill=NDV):
     :return: array
     """
 
-    a = None
     if fill == 0:
         a = numpy.zeros(shape=shape, dtype=dtype)
     else:
@@ -185,126 +152,6 @@ def union(a, b):
 
 def subset(a, b):
     return set(a) <= set(b)
-
-
-def get_satellite_string(satellites):
-    # TODO this assumes everything is Landsat!!!!
-    return "LS" + "".join([s.value.replace("LS", "") for s in satellites])
-
-
-def check_overwrite_remove_or_fail(path, overwrite):
-
-    if os.path.exists(path):
-        if overwrite:
-            _log.info("Removing existing output file [%s]", path)
-            os.remove(path)
-        else:
-            _log.error("Output file [%s] exists", path)
-            raise Exception("File [%s] exists" % path)
-
-
-def date_to_integer(d):
-    # Return an integer representing the YYYYMMDD value
-    return d.year * 10000 + d.month * 100 + d.day
-
-
-def get_dataset_datatype(dataset):
-    return get_dataset_type_datatype(dataset.dataset_type)
-
-
-def get_dataset_type_datatype(dataset_type):
-    return {
-        DatasetType.ARG25: gdalconst.GDT_Int16,
-        DatasetType.PQ25: gdalconst.GDT_Int16,
-        DatasetType.FC25: gdalconst.GDT_Int16,
-        DatasetType.WATER: gdalconst.GDT_Byte,
-        DatasetType.NDVI: gdalconst.GDT_Float32,
-        DatasetType.NDFI: gdalconst.GDT_Float32,
-        DatasetType.NDWI: gdalconst.GDT_Float32,
-        DatasetType.MNDWI: gdalconst.GDT_Float32,
-        DatasetType.EVI: gdalconst.GDT_Float32,
-        DatasetType.NBR: gdalconst.GDT_Float32,
-        DatasetType.TCI: gdalconst.GDT_Float32,
-        DatasetType.DSM: gdalconst.GDT_Float32,
-        DatasetType.DEM: gdalconst.GDT_Float32,
-        DatasetType.DEM_HYDROLOGICALLY_ENFORCED: gdalconst.GDT_Float32,
-        DatasetType.DEM_SMOOTHED: gdalconst.GDT_Float32
-    }[dataset_type]
-
-
-def get_dataset_ndv(dataset):
-    return get_dataset_type_ndv(dataset.dataset_type)
-
-
-def get_dataset_type_ndv(dataset_type):
-    return {
-        DatasetType.ARG25: NDV,
-        DatasetType.PQ25: UINT16_MAX,
-        DatasetType.FC25: NDV,
-        DatasetType.WATER: BYTE_MAX,
-        DatasetType.NDVI: NAN,
-        DatasetType.NDFI: NAN,
-        DatasetType.NDWI: NAN,
-        DatasetType.MNDWI: NAN,
-        DatasetType.EVI: NAN,
-        DatasetType.NBR: NAN,
-        DatasetType.TCI: NAN,
-        DatasetType.DSM: NAN,
-        DatasetType.DEM: NAN,
-        DatasetType.DEM_HYDROLOGICALLY_ENFORCED: NAN,
-        DatasetType.DEM_SMOOTHED: NAN
-    }[dataset_type]
-
-
-def get_dataset_type_data_type(dataset_type):
-    return {
-        DatasetType.ARG25: numpy.int16,
-        DatasetType.PQ25: numpy.uint16,
-        DatasetType.FC25: numpy.int16,
-        DatasetType.WATER: numpy.byte,
-        DatasetType.NDVI: numpy.float32,
-        DatasetType.NDFI: numpy.float32,
-        DatasetType.NDWI: numpy.float32,
-        DatasetType.MNDWI: numpy.float32,
-        DatasetType.EVI: numpy.float32,
-        DatasetType.NBR: numpy.float32,
-        DatasetType.TCI: numpy.float32,
-        DatasetType.DSM: numpy.int16
-    }[dataset_type]
-
-
-def get_band_name_union(dataset_type, satellites):
-
-    bands = [b.name for b in get_bands(dataset_type, satellites[0])]
-    for satellite in satellites[1:]:
-        for b in get_bands(dataset_type, satellite):
-            if b.name not in bands:
-                bands.append(b.name)
-    return bands
-
-
-def get_band_name_intersection(dataset_type, satellites):
-
-    bands = [b.name for b in get_bands(dataset_type, satellites[0])]
-    for satellite in satellites[1:]:
-        for band in bands:
-            if band not in [b.name for b in get_bands(dataset_type, satellite)]:
-                bands.remove(band)
-    return bands
-
-
-def format_date(d):
-    if d:
-        return d.strftime("%Y_%m_%d")
-
-    return None
-
-
-def format_date_time(d):
-    if d:
-        return d.strftime("%Y_%m_%d_%H_%M_%S")
-
-    return None
 
 
 def maskify_stack(stack, ndv=NDV):
@@ -541,16 +388,6 @@ def build_date_criteria(acq_min, acq_max, month_start, day_start, month_end, day
     return acq_min, acq_max, date_criteria
 
 
-def is_ndv(v, ndv=NDV):
-    if numpy.isnan(ndv):
-        if numpy.isnan(v):
-            return True
-    else:
-        if v == ndv:
-            return True
-    return False
-
-
 def writeable_dir(prospective_dir):
     if not os.path.exists(prospective_dir):
         raise argparse.ArgumentTypeError("{0} doesn't exist".format(prospective_dir))
@@ -577,10 +414,6 @@ def satellite_arg(s):
     if s in [sat.name for sat in Satellite]:
         return Satellite[s]
     raise argparse.ArgumentTypeError("{0} is not a supported satellite".format(s))
-
-
-def parse_date(s):
-    return datetime.strptime(s, "%Y-%m-%d").date()
 
 
 def parse_date_min(s):

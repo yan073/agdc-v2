@@ -1,43 +1,12 @@
-#!/usr/bin/env python
-
-# ===============================================================================
-# Copyright (c)  2014 Geoscience Australia
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in the
-#       documentation and/or other materials provided with the distribution.
-#     * Neither Geoscience Australia nor the names of its contributors may be
-#       used to endorse or promote products derived from this software
-#       without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
-# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-# ===============================================================================
-
-'''
+"""
      This program is cut out, modified and reformatted. It is now compliant to PEP8.
      The original program was written by "Simon Oldfield"
      __author__ = 'u81051'
-'''
+"""
 
 from __future__ import absolute_import
 import logging
-import os
 from enum import Enum
-
 
 _log = logging.getLogger(__name__)
 
@@ -119,7 +88,7 @@ class Ls8Arg25Bands(Enum):
 class Pq25Bands(Enum):
     __order__ = "PQ"
 
-    PQ = 1          # pylint: disable=invalid-name
+    PQ = 1  # pylint: disable=invalid-name
 
 
 class Fc25Bands(Enum):
@@ -225,7 +194,6 @@ DATASET_TYPE_DATABASE = [DatasetType.nbar, DatasetType.nbart, DatasetType.pqa, D
 DATASET_TYPE_DERIVED_NBAR = [DatasetType.NDVI, DatasetType.NDFI, DatasetType.EVI, DatasetType.NBR,
                              DatasetType.TCI, DatasetType.NDWI, DatasetType.MNDWI]
 
-
 BANDS = {
     (DatasetType.nbar, Satellite.LS5): Ls57Arg25Bands,
     (DatasetType.nbar, Satellite.LS7): Ls57Arg25Bands,
@@ -287,7 +255,6 @@ BANDS = {
 
 
 def get_bands(dataset_type, satellite):
-
     # Try WITH satellite
 
     if (dataset_type, satellite) in BANDS:

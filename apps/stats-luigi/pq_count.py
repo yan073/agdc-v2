@@ -1,33 +1,4 @@
 #!/usr/bin/env python
-
-# ===============================================================================
-# Copyright (c)  2016 Geoscience Australia
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in the
-#       documentation and/or other materials provided with the distribution.
-#     * Neither Geoscience Australia nor the names of its contributors may be
-#       used to endorse or promote products derived from this software
-#       without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY
-# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-# ===============================================================================
-
-
 """
     Calculates pixel quality counts for time series LANDSAT data
     __author__ = 'u81051'
@@ -48,16 +19,15 @@ import dask
 import numpy as np
 import xarray as xr
 import luigi
-from datacube.api.utils_v1 import parse_date_min, parse_date_max, PqaMask, writeable_dir
-from datacube.api.utils_v1 import pqa_mask_arg, season_arg
-from datacube.api.model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
-from datacube.api.model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
-from datacube.api.model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
-from datacube.api.utils_v1 import PercentileInterpolation, SEASONS
-from datacube.api.utils_v1 import Season, build_season_date_criteria
+from .utils_v1 import parse_date_min, parse_date_max, PqaMask, writeable_dir
+from .utils_v1 import pqa_mask_arg, season_arg
+from .model_v1 import Ls57Arg25Bands, Ls8Arg25Bands, NdviBands, NdfiBands, TciBands, Pq25Bands, Fc25Bands
+from .model_v1 import Wofs25Bands, NdwiBands, MndwiBands, EviBands, NbrBands, DsmBands
+from .model_v1 import DATASET_TYPE_DATABASE, DATASET_TYPE_DERIVED_NBAR, DatasetType
+from .utils_v1 import PercentileInterpolation, SEASONS
+from .utils_v1 import Season, build_season_date_criteria
 from datacube.index import index_connect
-# from datacube.api import make_mask, list_flag_names
-from datacube.storage.storage import GeoBox
+from datacube.model import GeoBox
 import datacube.api
 
 dask.set_options(get=dask.async.get_sync)
