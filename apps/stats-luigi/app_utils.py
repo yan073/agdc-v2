@@ -28,6 +28,10 @@ from dateutil.tz import tzlocal
 
 _log = logging.getLogger(__name__)
 
+SEASON_DICT = {'SUMMER': 'DJF', 'AUTUMN': 'MAM', 'WINTER': 'JJA', 'SPRING': 'SON',
+               'CALENDAR_YEAR': 'year', 'QTR_1': '1', 'QTR_2': '2',
+               'QTR_3': '3', 'QTR_4': '4'}
+
 
 def product_lookup(sat, dataset_type):
     """
@@ -167,6 +171,7 @@ def fuse_data(self, gw, dtype, mindt, maxdt):  # pylint: disable=too-many-locals
     cell_list_obj = None
     origattr = None
     for satellite in list(self.satellites):
+        # Load Data
         _log.info("\tloading dataset for %3d %4d on band  %s stats  %s  in the date range  %s %s for satellite %s",
                   self.x_cell, self.y_cell, self.band.name, self.statistic.name, mindt, maxdt, satellite)
         pq = None
@@ -181,6 +186,8 @@ def fuse_data(self, gw, dtype, mindt, maxdt):  # pylint: disable=too-many-locals
             continue
         origattr = data.attrs
         mask_clear = None
+
+        # Load AND Apply Mask for data
         if self.mask_pqa_apply:
             prodname = product_lookup(satellite, 'pqa')
             pq = gw.list_cells(my_cell, product=prodname, time=(mindt, maxdt))
@@ -202,13 +209,12 @@ def fuse_data(self, gw, dtype, mindt, maxdt):  # pylint: disable=too-many-locals
             _log.info("\tpq dataset call completed for %3d %4d on band  %s stats  %s pqdata %s",
                       self.x_cell, self.y_cell, self.band.name, self.statistic.name, pq)
 
+        # Group by Solar Day
         append_solar_day(data, get_mean_longitude(data))
         data = data.groupby('solar_day').max(dim='time')
-        season_dict = {'SUMMER': 'DJF', 'AUTUMN': 'MAM', 'WINTER': 'JJA', 'SPRING': 'SON',
-                       'CALENDAR_YEAR': 'year', 'QTR_1': '1', 'QTR_2': '2',
-                       'QTR_3': '3', 'QTR_4': '4'}
+
         if "QTR" in self.season.name:
-            data = data.isel(solar_day=data.groupby('solar_day.quarter').groups[int(season_dict[self.season.name])])
+            data = data.isel(solar_day=data.groupby('solar_day.quarter').groups[int(SEASON_DICT[self.season.name])])
         elif "CALENDAR" in self.season.name:
             year = int(str(data.groupby('solar_day.year').groups.keys()).strip('[]'))
             data = data.isel(solar_day=data.groupby('solar_day.year').groups[year])
@@ -243,7 +249,7 @@ def fuse_data(self, gw, dtype, mindt, maxdt):  # pylint: disable=too-many-locals
                 continue
             _log.info("Tidal datasets constructed")
         else:
-            data = data.isel(solar_day=data.groupby('solar_day.season').groups[season_dict[self.season.name]])
+            data = data.isel(solar_day=data.groupby('solar_day.season').groups[SEASON_DICT[self.season.name]])
 
         if self.band.name in [t.name for t in Ls57Arg25Bands]:
             data = get_band_data(self, data)
@@ -252,8 +258,8 @@ def fuse_data(self, gw, dtype, mindt, maxdt):  # pylint: disable=too-many-locals
 
         stack = np.zeros((len(data), 4000, 4000), dtype=dtype)
         _log.info("\t Time to start stacking for %s %s", satellite, str(datetime.now()))
-        for x_offset, y_offset in product(range(0, 4000, 4000),
-                                          range(0, 4000, 400)):
+
+        for x_offset, y_offset in product(range(0, 4000, 4000), range(0, 4000, 400)):
             stack[:, y_offset:y_offset + 400, x_offset:4000] = \
                 data.isel(x=slice(x_offset, 4000), y=slice(y_offset, y_offset + 400)).load().data
             _log.info("\t Time to stack 400 chunks  %s ", str(datetime.now()))
