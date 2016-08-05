@@ -45,7 +45,6 @@ setup(name='datacube',
           'matplotlib',
           'numexpr',
           'future',
-          'luigi',
       ],
       tests_require=[
           'pytest',
