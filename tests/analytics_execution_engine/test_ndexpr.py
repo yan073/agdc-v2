@@ -159,9 +159,9 @@ def test_2():
     assert ne.test("percentile(z1, 50)", np.percentile(z1, 50))
     assert ne.test("percentile(z1, 50)+percentile(z1, 50)", np.percentile(z1, 50) + np.percentile(z1, 50))
     assert ne.test("percentile(z1, (50))", np.percentile(z1, 50))
-    #assert ne.test("percentile(z1, (50, 60))", np.percentile(z1, (50, 60)))
-    #assert ne.test("percentile(z1, (50, 60, 70))", np.percentile(z1, (50, 60, 70)))
-    #assert ne.test("percentile(z1, (50, 60, 70)) + percentile(z1, (50, 60, 70))",
+    # assert ne.test("percentile(z1, (50, 60))", np.percentile(z1, (50, 60)))
+    # assert ne.test("percentile(z1, (50, 60, 70))", np.percentile(z1, (50, 60, 70)))
+    # assert ne.test("percentile(z1, (50, 60, 70)) + percentile(z1, (50, 60, 70))",
     #               np.percentile(z1, (50, 60, 70)) + np.percentile(z1, (50, 60, 70)))
     assert ne.test("1 + var(z1, 0, 0+1, 2) + 1", 1+xr.DataArray.var(z1, axis=(0, 0+1, 2))+1)
 
