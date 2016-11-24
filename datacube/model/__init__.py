@@ -538,12 +538,14 @@ class GridSpec(object):
         :param GeoPolygon geopolygon: Polygon to tile
         :return: iterator of grid cells with :py:class:`GeoBox` tiles
         """
+        result = []
         geopolygon = geopolygon.to_crs(self.crs)
         for tile_index, tile_geobox in self.tiles(geopolygon.boundingbox.buffered(*(tile_buffer or (0, 0)))):
             if tile_buffer:
                 tile_geobox = tile_geobox.buffered(*tile_buffer)
             if check_intersect(tile_geobox.extent, geopolygon):
-                yield tile_index, tile_geobox
+                result.append((tile_index, tile_geobox))
+        return result
 
     @staticmethod
     def grid_range(lower, upper, step):
